@@ -14,6 +14,7 @@
 #include "Carla/Game/FrameData.h"
 #include "Carla/Traffic/ServerTraffic.h"
 #include "Carla/Game/ServerPlayer.h"
+#include "Carla/Walker/ServerWalkers.h"
 
 #include <util/disable-ue4-macros.h>
 #include <carla/multigpu/router.h>
@@ -175,6 +176,9 @@ private:
 
   /// The vehicle driven from the simulator window (-server-player); null when off.
   std::unique_ptr<FServerPlayer> ServerPlayer;
+
+  /// Pedestrians walked by the server itself (-server-walkers=N); null when off.
+  std::unique_ptr<FServerWalkers> ServerWalkers;
 
   FEpisodeSettings CurrentSettings;
 

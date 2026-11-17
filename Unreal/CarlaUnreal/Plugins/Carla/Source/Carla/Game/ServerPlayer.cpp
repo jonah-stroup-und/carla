@@ -21,6 +21,9 @@
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Components/PrimitiveComponent.h"
+#include "Debug/DebugDrawService.h"
+#include "Engine/Canvas.h"
+#include "Engine/Font.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -65,6 +68,8 @@ namespace
   constexpr float GearRefusedHudSeconds = 1.5f;
   constexpr float StickDeadZone = 0.15f;
   constexpr uint64 HudMessageKey = 0x5E5E9A1E5ull;
+  /// The FPS counter averages frames over this window.
+  constexpr double FpsWindowSeconds = 0.5;
 
   enum class ECameraMode : uint8 { Chase, FarChase, Interior, Count };
 
@@ -87,7 +92,18 @@ public:
   FImpl(UCarlaEpisode &InEpisode, const FServerPlayerSettings &InSettings)
     : Episode(InEpisode),
       Settings(InSettings),
-      RandomEngine(static_cast<uint32>(InSettings.Seed)) {}
+      RandomEngine(static_cast<uint32>(InSettings.Seed))
+  {
+    // A canvas overlay rather than "stat fps": stat commands are compiled
+    // out of Shipping builds.
+    FpsDrawHandle = UDebugDrawService::Register(
+        TEXT("Game"), FDebugDrawDelegate::CreateRaw(this, &FImpl::DrawFps));
+  }
+
+  ~FImpl()
+  {
+    UDebugDrawService::Unregister(FpsDrawHandle);
+  }
 
   void Tick(float DeltaSeconds)
   {
@@ -460,6 +476,42 @@ private:
         false, FVector2D(1.5f, 1.5f));
   }
 
+  /// Top-right frame counter: rendered frames per second, averaged over
+  /// FpsWindowSeconds of wall-clock time, and the mean frame time.
+  void DrawFps(UCanvas *Canvas, APlayerController *)
+  {
+    if (Canvas == nullptr || GEngine == nullptr)
+    {
+      return;
+    }
+    const double Now = FPlatformTime::Seconds();
+    if (FpsWindowStart == 0.0)
+    {
+      FpsWindowStart = Now;
+    }
+    ++FpsFrames;
+    const double Elapsed = Now - FpsWindowStart;
+    if (Elapsed >= FpsWindowSeconds)
+    {
+      Fps = FpsFrames / Elapsed;
+      FpsFrames = 0;
+      FpsWindowStart = Now;
+    }
+    if (Fps <= 0.0)
+    {
+      return;
+    }
+    UFont *Font = GEngine->GetMediumFont();
+    const FString Text = FString::Printf(TEXT("%.0f fps  %.1f ms"), Fps, 1000.0 / Fps);
+    float Width = 0.0f;
+    float Height = 0.0f;
+    Canvas->StrLen(Font, Text, Width, Height);
+    const float Scale = 1.5f;
+    const FLinearColor Color = Fps >= 55.0 ? FLinearColor::Green : (Fps >= 30.0 ? FLinearColor::Yellow : FLinearColor::Red);
+    Canvas->SetDrawColor(Color.ToFColor(true));
+    Canvas->DrawText(Font, Text, Canvas->ClipX - Width * Scale - 24.0f, 16.0f, Scale, Scale);
+  }
+
   UCarlaEpisode &Episode;
   FServerPlayerSettings Settings;
   std::mt19937 RandomEngine;
@@ -481,6 +533,10 @@ private:
   bool bGearPadDown = false;
   double GearRefusedUntil = 0.0;
   bool bSpawned = false;
+  FDelegateHandle FpsDrawHandle;
+  double FpsWindowStart = 0.0;
+  int32 FpsFrames = 0;
+  double Fps = 0.0;
   bool bFailed = false;
 };
 

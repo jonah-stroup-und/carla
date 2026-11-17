@@ -653,6 +653,7 @@ void FCarlaEngine::NotifyBeginEpisode(UCarlaEpisode &Episode)
   // Server-side traffic: a secondary plays the primary's frames, traffic included.
   ServerTraffic.reset();
   ServerPlayer.reset();
+  ServerWalkers.reset();
   if (bIsPrimaryServer)
   {
     const FServerPlayerSettings PlayerSettings = FServerPlayerSettings::FromCommandLine();
@@ -664,6 +665,11 @@ void FCarlaEngine::NotifyBeginEpisode(UCarlaEpisode &Episode)
     if (TrafficSettings.IsEnabled())
     {
       ServerTraffic = std::make_unique<FServerTraffic>(Episode, TrafficSettings);
+    }
+    const FServerWalkersSettings WalkersSettings = FServerWalkersSettings::FromCommandLine();
+    if (WalkersSettings.IsEnabled())
+    {
+      ServerWalkers = std::make_unique<FServerWalkers>(Episode, WalkersSettings);
     }
   }
 
@@ -767,6 +773,7 @@ void FCarlaEngine::NotifyEndEpisode()
 {
   ServerTraffic.reset();
   ServerPlayer.reset();
+  ServerWalkers.reset();
   SensorStreams.CloseEpisode();
   Server.NotifyEndEpisode();
   uint64_t Dropped = 0u;
@@ -1017,6 +1024,10 @@ void FCarlaEngine::OnPreTick(UWorld *World, ELevelTick TickType, float DeltaSeco
     if (ServerTraffic)
     {
       ServerTraffic->Tick(DeltaSeconds);
+    }
+    if (ServerWalkers)
+    {
+      ServerWalkers->Tick(DeltaSeconds);
     }
   }
 
