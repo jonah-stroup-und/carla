@@ -34,6 +34,8 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import sys
+import time
 from collections import Counter
 
 import carla  # provided by the active interpreter; check_env.sh verifies this
@@ -174,7 +176,65 @@ def _pump(world) -> None:
             world.wait_for_tick()
 
 
-def _hold(world, what: str) -> None:
+class _Pacer:
+    """Holds a ticking loop to one tick per fixed_delta_seconds of wall time.
+
+    A synchronous holder that ticks back-to-back runs the simulation at
+    (server fps x fixed_delta_seconds) times real time -- measured 1.68x at
+    33.6 fps and 0.05 s -- which is right for data collection and wrong for a
+    human driving alongside the traffic. Deadlines are absolute, so sleep
+    jitter does not accumulate; a server slower than the target is never
+    "caught up" with a burst of ticks, it just runs slower than real time,
+    which is reported once.
+    """
+
+    _SPIN = 0.001  # finish each wait spinning, below the OS sleep granularity
+
+    def __init__(self, delta: float):
+        self.delta = delta
+        self.next = None
+        self.late = 0
+        self.warned = False
+        self._winmm = None
+        if sys.platform == "win32":
+            # Windows' default timer granularity is ~15.6 ms, coarser than a
+            # 33 ms frame can tolerate; ask for 1 ms for the life of the hold.
+            try:
+                import ctypes
+                self._winmm = ctypes.WinDLL("winmm")
+                self._winmm.timeBeginPeriod(1)
+            except (OSError, AttributeError):
+                self._winmm = None
+
+    def wait(self) -> None:
+        now = time.perf_counter()
+        if self.next is None:
+            self.next = now
+        self.next += self.delta
+        remaining = self.next - now
+        if remaining < 0:
+            # Behind: the server took longer than delta for that tick.
+            self.next = now
+            self.late += 1
+            if self.late >= 20 and not self.warned:
+                print(f"note: the server cannot render {1.0 / self.delta:g} fps here; "
+                      "the simulation is running slower than real time "
+                      "(raise --delta)", flush=True)
+                self.warned = True
+            return
+        self.late = 0
+        if remaining > self._SPIN:
+            time.sleep(remaining - self._SPIN)
+        while time.perf_counter() < self.next:
+            pass
+
+    def close(self) -> None:
+        if self._winmm is not None:
+            self._winmm.timeEndPeriod(1)
+            self._winmm = None
+
+
+def _hold(world, what: str, realtime: bool = False) -> None:
     """Stay alive pumping ticks until Ctrl+C, so the traffic keeps driving.
 
     The Traffic Manager lives in the process that created it. Verified on
@@ -190,11 +250,26 @@ def _hold(world, what: str) -> None:
     """
     print(f"holding {what}; Ctrl+C to release (the TM dies with this process "
           "and the vehicles coast to a stop)", flush=True)
+    pacer = None
+    if realtime:
+        if _OWNS_CLOCK:
+            delta = world.get_settings().fixed_delta_seconds
+            pacer = _Pacer(delta)
+            print(f"--realtime: one tick per {delta:g} s of wall time "
+                  f"({1.0 / delta:g} fps, 1.0x real time)", flush=True)
+        else:
+            print("--realtime ignored: another client owns the clock and sets "
+                  "the pace", flush=True)
     try:
         while True:
+            if pacer is not None:
+                pacer.wait()
             _pump(world)
     except KeyboardInterrupt:
         print("\nreleased: TM gone, autopilot vehicles will stop")
+    finally:
+        if pacer is not None:
+            pacer.close()
 
 
 
@@ -277,7 +352,7 @@ def cmd_spawn(args):
         print(f"  note: {want - len(ids)} failed (occupied points / collisions — normal)")
     try:
         if getattr(args, "hold", False):
-            _hold(world, f"{len(ids)} vehicles")
+            _hold(world, f"{len(ids)} vehicles", args.realtime)
         elif not args.no_autopilot:
             print("  note: this process owns the TM — it dies on exit and the vehicles "
                   "stop. Use --hold to keep them driving.")
@@ -344,7 +419,7 @@ def cmd_line(args):
               "raise --gap or --z-offset)")
     try:
         if getattr(args, "hold", False):
-            _hold(world, f"{len(ids)} vehicles in lane")
+            _hold(world, f"{len(ids)} vehicles in lane", args.realtime)
     finally:
         _release_clock(world, previous, tm)
 
@@ -506,6 +581,10 @@ def main() -> None:
     ps.add_argument("--no-autopilot", action="store_true", help="spawn parked (no TM autopilot)")
     ps.add_argument("--hold", action="store_true",
                     help="stay alive pumping ticks so the TM keeps driving them (Ctrl+C to stop)")
+    ps.add_argument("--realtime", action="store_true",
+                    help="with --hold: pace ticks to the wall clock, one per --delta, so "
+                         "the simulation runs at 1.0x real time instead of as fast as "
+                         "the server renders (for driving alongside the traffic)")
     ps.add_argument("--keep", action="store_true",
                     help="leave the spawned vehicles in the world on exit. By "
                          "default a held run destroys what it spawned, so "
@@ -537,6 +616,10 @@ def main() -> None:
     pl.add_argument("--no-autopilot", action="store_true", help="static queue (no autopilot)")
     pl.add_argument("--hold", action="store_true",
                     help="stay alive pumping ticks so the TM keeps driving them (Ctrl+C to stop)")
+    pl.add_argument("--realtime", action="store_true",
+                    help="with --hold: pace ticks to the wall clock, one per --delta, so "
+                         "the simulation runs at 1.0x real time instead of as fast as "
+                         "the server renders (for driving alongside the traffic)")
     pl.add_argument("--keep", action="store_true",
                     help="leave the spawned vehicles in the world on exit. By "
                          "default a held run destroys what it spawned, so "

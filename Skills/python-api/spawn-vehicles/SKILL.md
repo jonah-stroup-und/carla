@@ -49,6 +49,20 @@ The world settings are read before anything else happens:
   silently drops commands — it is what stopped `spawn-walkers`' `start()` from
   landing.
 
+**A held clock runs faster than real time unless `--realtime` is passed.**
+The holder ticks back-to-back, and each tick advances exactly `--delta` of
+simulation time, so the world runs at *server fps × delta*: measured 1.68×
+at 33.6 fps and 0.05 s, and drifting with the frame rate. That is right for
+data collection and wrong for someone driving `manual_control.py` beside the
+traffic. `--realtime` paces the ticks to the wall clock (one per `--delta`):
+1.0× as long as the server renders at least 1/delta fps, with a one-time note
+if it cannot. `--delta 0.0333 --realtime` gives 30 fps at 1.0×.
+
+**`manual_control.py` already holds a TM on :8000.** It creates one at start-up
+in a process that never ticks, so traffic spawned into it with the default
+`--tm-port` never moves. Pass `--tm-port 8001` when a manual-control client is
+running.
+
 The previous settings are restored on release, because a synchronous world with
 nothing ticking does not advance and looks exactly like a hung server. Stop a
 holder with Ctrl+C, never `kill -9`: the restore is in a `finally`.
@@ -99,6 +113,9 @@ python3 scripts/vehicles.py spawn --count 40 --hold --no-sync
 
 # a different fixed timestep
 python3 scripts/vehicles.py spawn --count 40 --hold --delta 0.033
+
+# traffic to drive among in manual_control.py: real time at 30 fps, own TM port
+python3 scripts/vehicles.py spawn --count 40 --hold --delta 0.0333 --realtime --tm-port 8001
 
 # four-wheeled cars only, reproducible
 python3 scripts/vehicles.py spawn --count 30 --safe --seed 42
