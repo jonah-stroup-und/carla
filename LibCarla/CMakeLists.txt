@@ -166,6 +166,7 @@ if (BUILD_CARLA_SERVER)
     ${LIBCARLA_SOURCE_PATH}/carla/streaming/detail/*.cpp
     ${LIBCARLA_SOURCE_PATH}/carla/streaming/detail/tcp/*.cpp
     ${LIBCARLA_SOURCE_PATH}/carla/multigpu/*.cpp
+    ${LIBCARLA_SOURCE_PATH}/carla/servertraffic/*.cpp
   )
 
   if (ENABLE_ROS2)
@@ -214,6 +215,7 @@ if (BUILD_CARLA_SERVER)
     ${LIBCARLA_SOURCE_PATH}/carla/streaming/detail/*.h
     ${LIBCARLA_SOURCE_PATH}/carla/streaming/low_level/*.h
     ${LIBCARLA_SOURCE_PATH}/carla/multigpu/*.h
+    ${LIBCARLA_SOURCE_PATH}/carla/servertraffic/*.h
     ${LIBCARLA_SOURCE_PATH}/util/*.h
   )
   

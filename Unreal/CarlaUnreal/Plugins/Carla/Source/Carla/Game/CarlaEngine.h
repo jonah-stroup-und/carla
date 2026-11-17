@@ -12,6 +12,8 @@
 #include "Carla/Settings/EpisodeSettings.h"
 #include "Carla/Util/NonCopyable.h"
 #include "Carla/Game/FrameData.h"
+#include "Carla/Traffic/ServerTraffic.h"
+#include "Carla/Game/ServerPlayer.h"
 
 #include <util/disable-ue4-macros.h>
 #include <carla/multigpu/router.h>
@@ -167,6 +169,12 @@ private:
   FWorldObserver WorldObserver;
 
   UCarlaEpisode *CurrentEpisode = nullptr;
+
+  /// Traffic driven by the server itself (-server-traffic=N); null when off.
+  std::unique_ptr<FServerTraffic> ServerTraffic;
+
+  /// The vehicle driven from the simulator window (-server-player); null when off.
+  std::unique_ptr<FServerPlayer> ServerPlayer;
 
   FEpisodeSettings CurrentSettings;
 

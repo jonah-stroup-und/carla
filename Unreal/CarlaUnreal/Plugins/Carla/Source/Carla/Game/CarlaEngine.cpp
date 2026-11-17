@@ -650,6 +650,23 @@ void FCarlaEngine::NotifyBeginEpisode(UCarlaEpisode &Episode)
 
   Episode.bIsPrimaryServer = bIsPrimaryServer;
 
+  // Server-side traffic: a secondary plays the primary's frames, traffic included.
+  ServerTraffic.reset();
+  ServerPlayer.reset();
+  if (bIsPrimaryServer)
+  {
+    const FServerPlayerSettings PlayerSettings = FServerPlayerSettings::FromCommandLine();
+    if (PlayerSettings.IsEnabled())
+    {
+      ServerPlayer = std::make_unique<FServerPlayer>(Episode, PlayerSettings);
+    }
+    const FServerTrafficSettings TrafficSettings = FServerTrafficSettings::FromCommandLine();
+    if (TrafficSettings.IsEnabled())
+    {
+      ServerTraffic = std::make_unique<FServerTraffic>(Episode, TrafficSettings);
+    }
+  }
+
   if (!bIsPrimaryServer && Secondary)
   {
     PreparedFrame.reset();
@@ -748,6 +765,8 @@ void FCarlaEngine::DetachFromPrimary(const char *Reason)
 
 void FCarlaEngine::NotifyEndEpisode()
 {
+  ServerTraffic.reset();
+  ServerPlayer.reset();
   SensorStreams.CloseEpisode();
   Server.NotifyEndEpisode();
   uint64_t Dropped = 0u;
@@ -987,6 +1006,18 @@ void FCarlaEngine::OnPreTick(UWorld *World, ELevelTick TickType, float DeltaSeco
     Time.AudioTimeSeconds = World->AudioTimeSeconds;
     Time.TimeDilation = WorldSettings ? WorldSettings->GetEffectiveTimeDilation() : 1.0f;
     PendingFrameTime = Time;
+
+    // After this frame's client commands, before actors and physics tick:
+    // the server traffic plans and drives on the frame about to be simulated.
+    // The player goes first, so it takes its spawn point before the traffic.
+    if (ServerPlayer)
+    {
+      ServerPlayer->Tick(DeltaSeconds);
+    }
+    if (ServerTraffic)
+    {
+      ServerTraffic->Tick(DeltaSeconds);
+    }
   }
 
   // update frame counter
