@@ -20,11 +20,16 @@ class UCarlaEpisode;
 ///   -server-player-vehicle=P       blueprint id or wildcard, default "vehicle.*"
 ///                                  (cars only; a random match is picked)
 ///   -server-player-seed=S          seed for the blueprint and spawn point
+///   -server-dlss[=MODE]            upscale the window with DLSS Super Resolution:
+///                                  dlaa, quality (the default), balanced,
+///                                  performance, or off (Unreal's TSR)
 struct FServerPlayerSettings
 {
   bool bEnabled = false;
   FString Filter = TEXT("vehicle.*");
   int32 Seed = 0;
+  /// Empty: leave the upscaler alone (TSR, unless the console changed it).
+  FString Dlss;
 
   bool IsEnabled() const { return bEnabled; }
 
@@ -45,7 +50,8 @@ struct FServerPlayerSettings
 ///
 /// Keyboard: W/Up throttle, S/Down brake, Q drive/reverse (when nearly
 /// stopped), A/D or Left/Right steer, Space handbrake, C camera (chase,
-/// far chase, interior), Backspace reset upright.
+/// far chase, interior), Backspace reset upright, F9 cycles the upscaler
+/// (TSR, DLAA, DLSS Quality, Balanced, Performance).
 /// Gamepad: right/left trigger throttle and brake, X drive/reverse, left
 /// stick steer, A handbrake, Y camera, Back reset.
 class FServerPlayer

@@ -24,6 +24,7 @@
 #include "Debug/DebugDrawService.h"
 #include "Engine/Canvas.h"
 #include "Engine/Font.h"
+#include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -48,6 +49,11 @@ FServerPlayerSettings FServerPlayerSettings::FromCommandLine()
   Settings.bEnabled = FParse::Param(CommandLine, TEXT("server-player"));
   FParse::Value(CommandLine, TEXT("-server-player-vehicle="), Settings.Filter);
   FParse::Value(CommandLine, TEXT("-server-player-seed="), Settings.Seed);
+  if (!FParse::Value(CommandLine, TEXT("-server-dlss="), Settings.Dlss) &&
+      FParse::Param(CommandLine, TEXT("server-dlss")))
+  {
+    Settings.Dlss = TEXT("quality");
+  }
   return Settings;
 }
 
@@ -70,6 +76,32 @@ namespace
   constexpr uint64 HudMessageKey = 0x5E5E9A1E5ull;
   /// The FPS counter averages frames over this window.
   constexpr double FpsWindowSeconds = 0.5;
+
+  /// The window's upscaler: Unreal's TSR at its automatic screen percentage,
+  /// or DLSS Super Resolution (DLSSRRDenoiser's r.DLSSSR.Viewport) at NVIDIA's
+  /// quality-mode render scales.
+  enum class EUpscaler : uint8 { Tsr, Dlaa, Quality, Balanced, Performance, Count };
+
+  struct FUpscalerMode
+  {
+    const TCHAR *Name;
+    const TCHAR *Flag;
+    bool bDlss;
+    float ScreenPercentage; // 0: Unreal's automatic, based on display resolution
+  };
+
+  constexpr FUpscalerMode UpscalerModes[] = {
+    {TEXT("TSR"),               TEXT("off"),         false, 0.0f},
+    {TEXT("DLAA"),              TEXT("dlaa"),        true,  100.0f},
+    {TEXT("DLSS Quality"),      TEXT("quality"),     true,  66.7f},
+    {TEXT("DLSS Balanced"),     TEXT("balanced"),    true,  58.0f},
+    {TEXT("DLSS Performance"),  TEXT("performance"), true,  50.0f},
+  };
+
+  const FUpscalerMode &GetMode(EUpscaler Upscaler)
+  {
+    return UpscalerModes[static_cast<uint8>(Upscaler)];
+  }
 
   enum class ECameraMode : uint8 { Chase, FarChase, Interior, Count };
 
@@ -98,6 +130,26 @@ public:
     // out of Shipping builds.
     FpsDrawHandle = UDebugDrawService::Register(
         TEXT("Game"), FDebugDrawDelegate::CreateRaw(this, &FImpl::DrawFps));
+    if (!Settings.Dlss.IsEmpty())
+    {
+      bool bKnown = false;
+      for (uint8 Index = 0; Index < static_cast<uint8>(EUpscaler::Count); ++Index)
+      {
+        if (Settings.Dlss.Equals(UpscalerModes[Index].Flag, ESearchCase::IgnoreCase))
+        {
+          Upscaler = static_cast<EUpscaler>(Index);
+          bKnown = true;
+        }
+      }
+      if (!bKnown)
+      {
+        UE_LOG(LogCarlaServerPlayer, Warning,
+            TEXT("Server player: unknown -server-dlss=%s (dlaa, quality, balanced, performance, off); using quality"),
+            *Settings.Dlss);
+        Upscaler = EUpscaler::Quality;
+      }
+      ApplyUpscaler();
+    }
   }
 
   ~FImpl()
@@ -132,6 +184,11 @@ public:
     }
 
     TakeView(*Controller);
+    if (Pressed(*Controller, EKeys::F9, bUpscalerKeyDown))
+    {
+      Upscaler = static_cast<EUpscaler>((static_cast<uint8>(Upscaler) + 1) % static_cast<uint8>(EUpscaler::Count));
+      ApplyUpscaler();
+    }
     Drive(*Controller, DeltaSeconds);
     FollowWithSpectator(*Controller);
     DrawHud();
@@ -369,6 +426,33 @@ private:
   }
 
   // ---------------------------------------------------------------------------
+  // Upscaler
+  // ---------------------------------------------------------------------------
+
+  void ApplyUpscaler()
+  {
+    const FUpscalerMode &Mode = GetMode(Upscaler);
+    IConsoleVariable *DlssViewport = IConsoleManager::Get().FindConsoleVariable(TEXT("r.DLSSSR.Viewport"));
+    IConsoleVariable *ScreenPercentage = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage"));
+    if (Mode.bDlss && DlssViewport == nullptr)
+    {
+      UE_LOG(LogCarlaServerPlayer, Warning,
+          TEXT("Server player: %s needs the DLSSRRDenoiser plugin built with the DLSS SDK; keeping TSR"), Mode.Name);
+      Upscaler = EUpscaler::Tsr;
+      return;
+    }
+    if (DlssViewport != nullptr)
+    {
+      DlssViewport->Set(Mode.bDlss ? 1 : 0, ECVF_SetByCode);
+    }
+    if (ScreenPercentage != nullptr)
+    {
+      ScreenPercentage->Set(Mode.ScreenPercentage, ECVF_SetByCode);
+    }
+    UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: upscaler %s"), Mode.Name);
+  }
+
+  // ---------------------------------------------------------------------------
   // Driving
   // ---------------------------------------------------------------------------
 
@@ -510,6 +594,21 @@ private:
     const FLinearColor Color = Fps >= 55.0 ? FLinearColor::Green : (Fps >= 30.0 ? FLinearColor::Yellow : FLinearColor::Red);
     Canvas->SetDrawColor(Color.ToFColor(true));
     Canvas->DrawText(Font, Text, Canvas->ClipX - Width * Scale - 24.0f, 16.0f, Scale, Scale);
+
+    // The upscaler, and the resolution the scene renders at before it.
+    const FUpscalerMode &Mode = GetMode(Upscaler);
+    FString UpscalerText = FString::Printf(TEXT("%s  [F9]"), Mode.Name);
+    if (Mode.ScreenPercentage > 0.0f)
+    {
+      const float Fraction = Mode.ScreenPercentage / 100.0f;
+      UpscalerText = FString::Printf(TEXT("%s %dx%d  [F9]"), Mode.Name,
+          FMath::RoundToInt(Canvas->ClipX * Fraction), FMath::RoundToInt(Canvas->ClipY * Fraction));
+    }
+    const float SmallScale = 1.1f;
+    Canvas->StrLen(Font, UpscalerText, Width, Height);
+    Canvas->SetDrawColor(FColor::White);
+    Canvas->DrawText(Font, UpscalerText, Canvas->ClipX - Width * SmallScale - 24.0f, 16.0f + Height * Scale + 4.0f,
+        SmallScale, SmallScale);
   }
 
   UCarlaEpisode &Episode;
@@ -533,6 +632,8 @@ private:
   bool bGearPadDown = false;
   double GearRefusedUntil = 0.0;
   bool bSpawned = false;
+  EUpscaler Upscaler = EUpscaler::Tsr;
+  bool bUpscalerKeyDown = false;
   FDelegateHandle FpsDrawHandle;
   double FpsWindowStart = 0.0;
   int32 FpsFrames = 0;
