@@ -4,6 +4,7 @@
 #include "Settings/CarlaSettings.h"
 #include "Lights/LightDefaultsEditorPanel.h"
 #include "BlueprintLibary/LightDefaultsJsonUtils.h"
+#include "Game/ServerPlayer.h"
 
 #include <util/ue-header-guard-begin.h>
 #include "Developer/Settings/Public/ISettingsModule.h"
@@ -27,6 +28,8 @@ void FCarlaModule::StartupModule()
 	AddShaderSearchPaths();
 	RegisterSettings();
 	LoadChronoDll();
+	// Before the game window exists (this module loads at PostConfigInit).
+	FServerPlayerSettings::ConfigureWindowFromCommandLine();
 	ULightDefaultsJsonUtils::RegisterRuntimeBuildingDefaultsHooks();
 #if WITH_EDITOR
 	RegisterLightDefaultsEditorTab();

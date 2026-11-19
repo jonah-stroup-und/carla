@@ -25,6 +25,12 @@ class UCarlaEpisode;
 ///                                  performance, or off (Unreal's TSR)
 ///   -server-reports=DIR            where the drive reports go, default Reports
 ///                                  on the desktop
+///   -server-surround[=FOV]         spread the window over three side-by-side
+///                                  monitors, each with its own camera turned
+///                                  to face that way; FOV is the centre
+///                                  screen's horizontal field of view in
+///                                  degrees (default 60), the side screens
+///                                  continue it
 struct FServerPlayerSettings
 {
   bool bEnabled = false;
@@ -32,10 +38,16 @@ struct FServerPlayerSettings
   int32 Seed = 0;
   /// Empty: leave the upscaler alone (TSR, unless the console changed it).
   FString Dlss;
+  bool bSurround = false;
+  float SurroundFov = 60.0f;
 
   bool IsEnabled() const { return bEnabled; }
 
   static FServerPlayerSettings FromCommandLine();
+
+  /// -server-surround needs a borderless window, and the window is created
+  /// before any episode: the Carla module calls this at startup.
+  static void ConfigureWindowFromCommandLine();
 };
 
 /// A vehicle driven from the simulator window, so the server runs as a

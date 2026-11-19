@@ -112,9 +112,11 @@ public class Carla :
 
     PrivateDependencyModuleNames.AddRange(new string[]
     {
+      "ApplicationCore",
       "AssetRegistry",
       "CoreUObject",
       "Engine",
+      "EngineSettings",
       "Foliage",
       "HTTP",
       "StaticMeshDescription",

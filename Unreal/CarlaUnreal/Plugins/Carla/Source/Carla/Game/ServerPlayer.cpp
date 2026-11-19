@@ -19,12 +19,19 @@
 #include "Carla/Vehicle/VehicleInputPriority.h"
 
 #include <util/ue-header-guard-begin.h>
+#include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Components/PrimitiveComponent.h"
 #include "Debug/DebugDrawService.h"
 #include "Engine/Canvas.h"
 #include "Engine/Font.h"
+#include "Engine/GameViewportClient.h"
+#include "Engine/LocalPlayer.h"
+#include "GameMapsSettings.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Widgets/SWindow.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
@@ -55,7 +62,30 @@ FServerPlayerSettings FServerPlayerSettings::FromCommandLine()
   {
     Settings.Dlss = TEXT("quality");
   }
+  if (FParse::Value(CommandLine, TEXT("-server-surround="), Settings.SurroundFov))
+  {
+    Settings.bSurround = true;
+  }
+  else
+  {
+    Settings.bSurround = FParse::Param(CommandLine, TEXT("server-surround"));
+  }
+  Settings.SurroundFov = FMath::Clamp(Settings.SurroundFov, 20.0f, 120.0f);
   return Settings;
+}
+
+void FServerPlayerSettings::ConfigureWindowFromCommandLine()
+{
+  if (!FServerPlayerSettings::FromCommandLine().bSurround)
+  {
+    return;
+  }
+  // Read by UGameEngine::CreateGameWindow: no title bar or frame, so the
+  // window can cover the monitors edge to edge, and no aspect lock when it
+  // is resized to span them.
+  const TCHAR *Section = TEXT("/Script/EngineSettings.GeneralProjectSettings");
+  GConfig->SetBool(Section, TEXT("bUseBorderlessWindow"), true, GGameIni);
+  GConfig->SetBool(Section, TEXT("bShouldWindowPreserveAspectRatio"), false, GGameIni);
 }
 
 // =============================================================================
@@ -74,7 +104,6 @@ namespace
   constexpr float GearSwitchSpeed = 140.0f;
   constexpr float GearRefusedHudSeconds = 1.5f;
   constexpr float StickDeadZone = 0.15f;
-  constexpr uint64 HudMessageKey = 0x5E5E9A1E5ull;
   /// The FPS counter averages frames over this window.
   constexpr double FpsWindowSeconds = 0.5;
   /// A turn signal cancels itself this long after the lane change it
@@ -110,6 +139,12 @@ namespace
   }
 
   enum class ECameraMode : uint8 { Chase, FarChase, Interior, Count };
+
+  /// Surround: the three monitors left to right, and which monitor each
+  /// local player sees. Player 0 (keyboard, first gamepad) takes the centre.
+  constexpr int32 SurroundScreens = 3;
+  constexpr int32 SurroundCentre = 1;
+  constexpr int32 SurroundPlayerScreen[SurroundScreens] = {1, 0, 2};
 
   const TCHAR *CameraModeName(ECameraMode Mode)
   {
@@ -162,6 +197,13 @@ public:
   {
     Report.reset();
     UDebugDrawService::Unregister(FpsDrawHandle);
+    for (TWeakObjectPtr<ACameraActor> &SideCamera : SideCameras)
+    {
+      if (SideCamera.IsValid())
+      {
+        SideCamera->Destroy();
+      }
+    }
   }
 
   void Tick(float DeltaSeconds)
@@ -193,6 +235,16 @@ public:
     }
 
     TakeView(*Controller);
+    if (Settings.bSurround && !bSurroundFailed)
+    {
+      if (!bSurroundReady)
+      {
+        bSurroundReady = SetupSurround();
+        bSurroundFailed = !bSurroundReady;
+        AttachSurroundCameras();
+      }
+      TakeSurroundViews();
+    }
     if (Pressed(*Controller, EKeys::F9, bUpscalerKeyDown))
     {
       Upscaler = static_cast<EUpscaler>((static_cast<uint8>(Upscaler) + 1) % static_cast<uint8>(EUpscaler::Count));
@@ -350,12 +402,192 @@ private:
     UCameraComponent *NewCamera = NewObject<UCameraComponent>(Car, TEXT("ServerPlayerCamera"));
     NewCamera->SetupAttachment(NewArm, USpringArmComponent::SocketName);
     NewCamera->FieldOfView = 90.0f;
+    if (bSurroundReady)
+    {
+      ApplySurroundLens(*NewCamera, SurroundFovs[SurroundCentre]);
+    }
     NewCamera->RegisterComponent();
     Car->AddInstanceComponent(NewCamera);
 
     Arm = NewArm;
     Camera = NewCamera;
     ApplyCameraMode();
+    AttachSurroundCameras();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Surround (three monitors)
+  // ---------------------------------------------------------------------------
+
+  /// Spans the window over the three leftmost monitors, splits it into one
+  /// view per monitor (Unreal's three-player split screen, laid out on the
+  /// monitors' rectangles), and works out each screen's field of view and
+  /// heading. All screens share one vertical field of view, so the picture
+  /// lines up across them, and each side screen's heading puts its inner
+  /// edge where the centre screen's edge is.
+  bool SetupSurround()
+  {
+    UGameViewportClient *Viewport = GEngine != nullptr ? GEngine->GameViewport : nullptr;
+    TSharedPtr<SWindow> Window = Viewport != nullptr ? Viewport->GetWindow() : nullptr;
+    if (!Window.IsValid())
+    {
+      UE_LOG(LogCarlaServerPlayer, Error, TEXT("Server player: surround needs a game window; disabled"));
+      return false;
+    }
+
+    FDisplayMetrics Metrics;
+    FDisplayMetrics::RebuildDisplayMetrics(Metrics);
+    TArray<FPlatformRect> Monitors;
+    for (const FMonitorInfo &Info : Metrics.MonitorInfo)
+    {
+      Monitors.Add(Info.DisplayRect);
+    }
+    if (Monitors.Num() < SurroundScreens)
+    {
+      UE_LOG(LogCarlaServerPlayer, Error, TEXT("Server player: surround needs 3 monitors, found %d; disabled"), Monitors.Num());
+      return false;
+    }
+    Monitors.Sort([](const FPlatformRect &A, const FPlatformRect &B) { return A.Left < B.Left; });
+    if (Monitors.Num() > SurroundScreens)
+    {
+      UE_LOG(LogCarlaServerPlayer, Warning, TEXT("Server player: %d monitors; surround uses the three leftmost"), Monitors.Num());
+      Monitors.SetNum(SurroundScreens);
+    }
+
+    FPlatformRect Bounds = Monitors[0];
+    for (const FPlatformRect &Monitor : Monitors)
+    {
+      Bounds.Left = FMath::Min(Bounds.Left, Monitor.Left);
+      Bounds.Top = FMath::Min(Bounds.Top, Monitor.Top);
+      Bounds.Right = FMath::Max(Bounds.Right, Monitor.Right);
+      Bounds.Bottom = FMath::Max(Bounds.Bottom, Monitor.Bottom);
+    }
+    const float Width = static_cast<float>(Bounds.Right - Bounds.Left);
+    const float Height = static_cast<float>(Bounds.Bottom - Bounds.Top);
+
+    if (Window->HasOSWindowBorder())
+    {
+      UE_LOG(LogCarlaServerPlayer, Warning, TEXT("Server player: the window has a frame; surround will show its title bar"));
+    }
+    Window->SetWindowMode(EWindowMode::Windowed);
+    Window->ReshapeWindow(FVector2D(Bounds.Left, Bounds.Top), FVector2D(Width, Height));
+
+    // Fields of view from the centre screen's, at a shared vertical one.
+    const auto AspectOf = [](const FPlatformRect &Monitor) {
+      return static_cast<float>(Monitor.Right - Monitor.Left) / static_cast<float>(Monitor.Bottom - Monitor.Top);
+    };
+    const float TanHalfVertical = FMath::Tan(FMath::DegreesToRadians(Settings.SurroundFov * 0.5f)) / AspectOf(Monitors[SurroundCentre]);
+    for (int32 Screen = 0; Screen < SurroundScreens; ++Screen)
+    {
+      SurroundFovs[Screen] = 2.0f * FMath::RadiansToDegrees(FMath::Atan(TanHalfVertical * AspectOf(Monitors[Screen])));
+    }
+    SurroundYaws[0] = -0.5f * (SurroundFovs[SurroundCentre] + SurroundFovs[0]);
+    SurroundYaws[SurroundCentre] = 0.0f;
+    SurroundYaws[2] = 0.5f * (SurroundFovs[SurroundCentre] + SurroundFovs[2]);
+    SurroundCentreWidth = static_cast<float>(Monitors[SurroundCentre].Right - Monitors[SurroundCentre].Left);
+
+    // Three-player split screen, each player's view on its monitor.
+    UGameMapsSettings *Maps = GetMutableDefault<UGameMapsSettings>();
+    Maps->bUseSplitscreen = true;
+    Maps->ThreePlayerSplitscreenLayout = EThreePlayerSplitScreenType::Vertical;
+    Viewport->SetForceDisableSplitscreen(false);
+    TArray<FPerPlayerSplitscreenData> &Layout = Viewport->SplitscreenInfo[ESplitScreenType::ThreePlayer_Vertical].PlayerData;
+    Layout.Reset();
+    for (int32 Player = 0; Player < SurroundScreens; ++Player)
+    {
+      const FPlatformRect &Monitor = Monitors[SurroundPlayerScreen[Player]];
+      Layout.Add(FPerPlayerSplitscreenData(
+          (Monitor.Right - Monitor.Left) / Width, (Monitor.Bottom - Monitor.Top) / Height,
+          (Monitor.Left - Bounds.Left) / Width, (Monitor.Top - Bounds.Top) / Height));
+    }
+
+    // The two side players (local players outlive the map, so a reloaded
+    // episode reuses them).
+    UWorld *World = Episode.GetWorld();
+    while (UGameplayStatics::GetPlayerController(World, SurroundScreens - 1) == nullptr)
+    {
+      if (UGameplayStatics::CreatePlayer(World, -1, true) == nullptr)
+      {
+        UE_LOG(LogCarlaServerPlayer, Error, TEXT("Server player: cannot add the side screens' players; surround disabled"));
+        Maps->bUseSplitscreen = false;
+        return false;
+      }
+    }
+
+    if (UCameraComponent *Centre = Camera.Get())
+    {
+      ApplySurroundLens(*Centre, SurroundFovs[SurroundCentre]);
+    }
+    UE_LOG(LogCarlaServerPlayer, Log,
+        TEXT("Server player: surround over %.0fx%.0f at (%d, %d): left %.1f deg at %.1f, centre %.1f deg, right %.1f deg at %.1f"),
+        Width, Height, Bounds.Left, Bounds.Top, SurroundFovs[0], SurroundYaws[0], SurroundFovs[SurroundCentre],
+        SurroundFovs[2], SurroundYaws[2]);
+    return true;
+  }
+
+  /// The field of view is horizontal across the camera's own view, whatever
+  /// the project's aspect-ratio axis constraint.
+  static void ApplySurroundLens(UCameraComponent &Lens, float Fov)
+  {
+    Lens.SetFieldOfView(Fov);
+    Lens.SetConstraintAspectRatio(false);
+    Lens.bOverrideAspectRatioAxisConstraint = true;
+    Lens.SetAspectRatioAxisConstraint(EAspectRatioAxisConstraint::AspectRatio_MaintainXFOV);
+  }
+
+  /// The side screens' cameras ride on the same spring arm as the centre
+  /// one, turned by their headings, so every camera mode works across all
+  /// three screens.
+  void AttachSurroundCameras()
+  {
+    USpringArmComponent *SpringArm = Arm.Get();
+    if (!bSurroundReady || SpringArm == nullptr)
+    {
+      return;
+    }
+    for (int32 Side = 0; Side < 2; ++Side)
+    {
+      const int32 Screen = SurroundPlayerScreen[Side + 1];
+      ACameraActor *SideCamera = SideCameras[Side].Get();
+      if (SideCamera == nullptr)
+      {
+        FActorSpawnParameters Parameters;
+        Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        SideCamera = Episode.GetWorld()->SpawnActor<ACameraActor>(Parameters);
+        SideCameras[Side] = SideCamera;
+      }
+      ApplySurroundLens(*SideCamera->GetCameraComponent(), SurroundFovs[Screen]);
+      SideCamera->AttachToComponent(SpringArm, FAttachmentTransformRules::KeepRelativeTransform, USpringArmComponent::SocketName);
+      SideCamera->SetActorRelativeLocation(FVector::ZeroVector);
+      SideCamera->SetActorRelativeRotation(FRotator(0.0f, SurroundYaws[Screen], 0.0f));
+    }
+  }
+
+  void TakeSurroundViews()
+  {
+    if (!bSurroundReady)
+    {
+      return;
+    }
+    for (int32 Side = 0; Side < 2; ++Side)
+    {
+      APlayerController *SideController = UGameplayStatics::GetPlayerController(Episode.GetWorld(), Side + 1);
+      ACameraActor *SideCamera = SideCameras[Side].Get();
+      if (SideController == nullptr || SideCamera == nullptr)
+      {
+        continue;
+      }
+      SideController->bAutoManageActiveCameraTarget = false;
+      if (SideController->GetViewTarget() != SideCamera)
+      {
+        SideController->SetViewTarget(SideCamera);
+      }
+      APawn *SidePawn = SideController->GetPawn();
+      if (SidePawn != nullptr && SidePawn->InputEnabled())
+      {
+        SidePawn->DisableInput(SideController);
+      }
+    }
   }
 
   void ApplyCameraMode()
@@ -605,7 +837,7 @@ private:
     Steer = 0.0f;
   }
 
-  void DrawHud() const
+  void DrawHud()
   {
     if (GEngine == nullptr)
     {
@@ -613,23 +845,34 @@ private:
     }
     const float SpeedKmh = Vehicle->GetVehicleForwardSpeed() * 0.036f;
     const bool bRefused = FPlatformTime::Seconds() < GearRefusedUntil;
+    HudColor = bRefused ? FColor::Orange : FColor::White;
     const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
     const TCHAR *SignalText = Lights.LeftBlinker ? TEXT("<< ") : (Lights.RightBlinker ? TEXT(" >>") : TEXT(" - "));
-    GEngine->AddOnScreenDebugMessage(HudMessageKey, 1.0f, bRefused ? FColor::Orange : FColor::White,
-        FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    reset [Backspace]    violations: %d"),
+    HudText = FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    reset [Backspace]    violations: %d"),
             FMath::Abs(SpeedKmh), bReverse ? TEXT("R") : TEXT("D"),
             bRefused ? TEXT(" (stop to shift)") : TEXT(""), SignalText, CameraModeName(CameraMode),
-            Report ? Report->GetViolationCount() : 0),
-        false, FVector2D(1.5f, 1.5f));
+            Report ? Report->GetViolationCount() : 0);
   }
 
   /// Top-right frame counter: rendered frames per second, averaged over
   /// FpsWindowSeconds of wall-clock time, and the mean frame time.
-  void DrawFps(UCanvas *Canvas, APlayerController *)
+  void DrawFps(UCanvas *Canvas, APlayerController *ViewController)
   {
     if (Canvas == nullptr || GEngine == nullptr)
     {
       return;
+    }
+    // Called once per player's view: draw on the driver's (the centre
+    // screen in surround). The canvas origin is that view's corner.
+    if (ViewController != nullptr && ViewController != UGameplayStatics::GetPlayerController(Episode.GetWorld(), 0))
+    {
+      return;
+    }
+    const float ViewWidth = bSurroundReady ? SurroundCentreWidth : Canvas->ClipX;
+    if (!HudText.IsEmpty())
+    {
+      Canvas->SetDrawColor(HudColor);
+      Canvas->DrawText(GEngine->GetMediumFont(), HudText, 24.0f, 16.0f, 1.3f, 1.3f);
     }
     const double Now = FPlatformTime::Seconds();
     if (FpsWindowStart == 0.0)
@@ -656,7 +899,7 @@ private:
     const float Scale = 1.5f;
     const FLinearColor Color = Fps >= 55.0 ? FLinearColor::Green : (Fps >= 30.0 ? FLinearColor::Yellow : FLinearColor::Red);
     Canvas->SetDrawColor(Color.ToFColor(true));
-    Canvas->DrawText(Font, Text, Canvas->ClipX - Width * Scale - 24.0f, 16.0f, Scale, Scale);
+    Canvas->DrawText(Font, Text, ViewWidth - Width * Scale - 24.0f, 16.0f, Scale, Scale);
 
     // The upscaler, and the resolution the scene renders at before it.
     const FUpscalerMode &Mode = GetMode(Upscaler);
@@ -665,12 +908,12 @@ private:
     {
       const float Fraction = Mode.ScreenPercentage / 100.0f;
       UpscalerText = FString::Printf(TEXT("%s %dx%d  [F9]"), Mode.Name,
-          FMath::RoundToInt(Canvas->ClipX * Fraction), FMath::RoundToInt(Canvas->ClipY * Fraction));
+          FMath::RoundToInt(ViewWidth * Fraction), FMath::RoundToInt(Canvas->ClipY * Fraction));
     }
     const float SmallScale = 1.1f;
     Canvas->StrLen(Font, UpscalerText, Width, Height);
     Canvas->SetDrawColor(FColor::White);
-    Canvas->DrawText(Font, UpscalerText, Canvas->ClipX - Width * SmallScale - 24.0f, 16.0f + Height * Scale + 4.0f,
+    Canvas->DrawText(Font, UpscalerText, ViewWidth - Width * SmallScale - 24.0f, 16.0f + Height * Scale + 4.0f,
         SmallScale, SmallScale);
   }
 
@@ -706,6 +949,14 @@ private:
   EUpscaler Upscaler = EUpscaler::Tsr;
   bool bUpscalerKeyDown = false;
   FDelegateHandle FpsDrawHandle;
+  FString HudText;
+  FColor HudColor = FColor::White;
+  bool bSurroundReady = false;
+  bool bSurroundFailed = false;
+  float SurroundFovs[SurroundScreens] = {60.0f, 60.0f, 60.0f};
+  float SurroundYaws[SurroundScreens] = {-60.0f, 0.0f, 60.0f};
+  float SurroundCentreWidth = 0.0f;
+  TWeakObjectPtr<ACameraActor> SideCameras[2];
   double FpsWindowStart = 0.0;
   int32 FpsFrames = 0;
   double Fps = 0.0;
