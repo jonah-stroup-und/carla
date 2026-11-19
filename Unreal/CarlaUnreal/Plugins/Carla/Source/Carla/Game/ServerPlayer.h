@@ -23,6 +23,8 @@ class UCarlaEpisode;
 ///   -server-dlss[=MODE]            upscale the window with DLSS Super Resolution:
 ///                                  dlaa, quality (the default), balanced,
 ///                                  performance, or off (Unreal's TSR)
+///   -server-reports=DIR            where the drive reports go, default Reports
+///                                  on the desktop
 struct FServerPlayerSettings
 {
   bool bEnabled = false;
@@ -49,11 +51,15 @@ struct FServerPlayerSettings
 /// the player's camera, so a client's world.get_spectator() keeps working.
 ///
 /// Keyboard: W/Up throttle, S/Down brake, Q drive/reverse (when nearly
-/// stopped), A/D or Left/Right steer, Space handbrake, C camera (chase,
-/// far chase, interior), Backspace reset upright, F9 cycles the upscaler
-/// (TSR, DLAA, DLSS Quality, Balanced, Performance).
+/// stopped), A/D or Left/Right steer, Z/X left/right turn signal, Space
+/// handbrake, C camera (chase, far chase, interior), Backspace reset upright,
+/// F9 cycles the upscaler (TSR, DLAA, DLSS Quality, Balanced, Performance).
 /// Gamepad: right/left trigger throttle and brake, X drive/reverse, left
-/// stick steer, A handbrake, Y camera, Back reset.
+/// stick steer, d-pad left/right turn signal, A handbrake, Y camera, Back reset.
+///
+/// Each drive (a vehicle, from spawn to the end of the episode) is recorded
+/// by an FServerDriveReport: collisions and traffic violations, written as
+/// two CSV files to Reports on the desktop (or -server-reports=DIR).
 class FServerPlayer
 {
 public:

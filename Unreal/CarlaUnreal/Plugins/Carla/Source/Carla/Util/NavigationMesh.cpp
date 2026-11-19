@@ -59,6 +59,12 @@ TArray<uint8> FNavigationMesh::Load(FString MapName)
   if (!Files.Num())
   {
     IFileManager::Get().FindFilesRecursive(Files, *FPaths::ProjectContentDir(), *FileName, true, false, false);
+    // The Traffic Manager's road-graph cache is also <Map>.bin, in Maps/TM:
+    // keep only navmeshes, which live in a Nav directory, so the search order
+    // cannot hand the crowd a road graph.
+    Files.RemoveAll([](const FString &File) {
+      return FPaths::GetCleanFilename(FPaths::GetPath(File)) != TEXT("Nav");
+    });
   }
 
   TArray<uint8> Content;

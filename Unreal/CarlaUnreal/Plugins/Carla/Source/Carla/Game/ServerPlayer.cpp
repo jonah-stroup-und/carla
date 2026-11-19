@@ -13,6 +13,7 @@
 #include "Carla/Game/CarlaEpisode.h"
 #include "Carla/Game/CarlaGameModeBase.h"
 #include "Carla/Game/CarlaStatics.h"
+#include "Carla/Game/ServerDriveReport.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "Carla/Vehicle/VehicleControl.h"
 #include "Carla/Vehicle/VehicleInputPriority.h"
@@ -76,6 +77,11 @@ namespace
   constexpr uint64 HudMessageKey = 0x5E5E9A1E5ull;
   /// The FPS counter averages frames over this window.
   constexpr double FpsWindowSeconds = 0.5;
+  /// A turn signal cancels itself this long after the lane change it
+  /// announced, or when the steering returns after a turn.
+  constexpr double SignalCancelAfterLaneChange = 1.5;
+  constexpr float SignalTurnSteer = 0.3f;
+  constexpr float SignalCenteredSteer = 0.05f;
 
   /// The window's upscaler: Unreal's TSR at its automatic screen percentage,
   /// or DLSS Super Resolution (DLSSRRDenoiser's r.DLSSSR.Viewport) at NVIDIA's
@@ -154,6 +160,7 @@ public:
 
   ~FImpl()
   {
+    Report.reset();
     UDebugDrawService::Unregister(FpsDrawHandle);
   }
 
@@ -174,12 +181,14 @@ public:
       {
         UE_LOG(LogCarlaServerPlayer, Warning, TEXT("Server player: the vehicle was destroyed; spawning a new one"));
       }
+      Report.reset(); // that drive is over
       if (!Spawn())
       {
         bFailed = true;
         return;
       }
       AttachCamera();
+      Report = std::make_unique<FServerDriveReport>(Episode, *Vehicle, BlueprintId);
       bSpawned = true;
     }
 
@@ -190,6 +199,8 @@ public:
       ApplyUpscaler();
     }
     Drive(*Controller, DeltaSeconds);
+    Signal(*Controller);
+    Report->Tick();
     FollowWithSpectator(*Controller);
     DrawHud();
   }
@@ -248,6 +259,7 @@ private:
         continue;
       }
       Vehicle = Spawned;
+      BlueprintId = Definition.Id;
       const FActorInfo *Info = Result.Value->GetActorInfo();
       if (Info != nullptr)
       {
@@ -531,6 +543,54 @@ private:
     Car->ApplyVehicleControl(Control, EVehicleInputPriority::User);
   }
 
+  /// Z/X (or the d-pad) toggle the left/right turn signal; a signal cancels
+  /// itself after a lane change or a turn, like a real one.
+  void Signal(APlayerController &Controller)
+  {
+    ACarlaWheeledVehicle *Car = Vehicle.Get();
+    FVehicleLightState Lights = Car->GetVehicleLightState();
+    const bool bLeftPressed = Pressed(Controller, EKeys::Z, bLeftKeyDown) | Pressed(Controller, EKeys::Gamepad_DPad_Left, bLeftPadDown);
+    const bool bRightPressed = Pressed(Controller, EKeys::X, bRightKeyDown) | Pressed(Controller, EKeys::Gamepad_DPad_Right, bRightPadDown);
+    bool bLeft = Lights.LeftBlinker;
+    bool bRight = Lights.RightBlinker;
+    if (bLeftPressed)
+    {
+      bLeft = !bLeft;
+      bRight = false;
+    }
+    if (bRightPressed)
+    {
+      bRight = !bRight;
+      bLeft = false;
+    }
+    if (bLeftPressed || bRightPressed)
+    {
+      SignalSince = Episode.GetElapsedGameTime();
+      bSignalTurned = false;
+    }
+    else if (bLeft || bRight)
+    {
+      // Cancel after the lane change it announced...
+      const double LaneChange = Report->GetLastSignalledLaneChange();
+      const double Now = Episode.GetElapsedGameTime();
+      const bool bLaneChangeDone = LaneChange >= SignalSince && Now - LaneChange >= SignalCancelAfterLaneChange;
+      // ...or once the wheel comes back from a turn the way it points.
+      const float Toward = bLeft ? -Steer : Steer;
+      bSignalTurned = bSignalTurned || Toward > SignalTurnSteer;
+      if (bLaneChangeDone || (bSignalTurned && FMath::Abs(Steer) < SignalCenteredSteer))
+      {
+        bLeft = false;
+        bRight = false;
+      }
+    }
+    if (bLeft != Lights.LeftBlinker || bRight != Lights.RightBlinker)
+    {
+      Lights.LeftBlinker = bLeft;
+      Lights.RightBlinker = bRight;
+      Car->SetVehicleLightState(Lights);
+    }
+  }
+
   void ResetUpright(ACarlaWheeledVehicle &Car)
   {
     const FRotator Yaw(0.0f, Car.GetActorRotation().Yaw, 0.0f);
@@ -553,10 +613,13 @@ private:
     }
     const float SpeedKmh = Vehicle->GetVehicleForwardSpeed() * 0.036f;
     const bool bRefused = FPlatformTime::Seconds() < GearRefusedUntil;
+    const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
+    const TCHAR *SignalText = Lights.LeftBlinker ? TEXT("<< ") : (Lights.RightBlinker ? TEXT(" >>") : TEXT(" - "));
     GEngine->AddOnScreenDebugMessage(HudMessageKey, 1.0f, bRefused ? FColor::Orange : FColor::White,
-        FString::Printf(TEXT("%3.0f km/h  %s%s    gear [Q]    camera: %s [C]    reset [Backspace]"),
+        FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    reset [Backspace]    violations: %d"),
             FMath::Abs(SpeedKmh), bReverse ? TEXT("R") : TEXT("D"),
-            bRefused ? TEXT(" (stop to shift)") : TEXT(""), CameraModeName(CameraMode)),
+            bRefused ? TEXT(" (stop to shift)") : TEXT(""), SignalText, CameraModeName(CameraMode),
+            Report ? Report->GetViolationCount() : 0),
         false, FVector2D(1.5f, 1.5f));
   }
 
@@ -632,6 +695,14 @@ private:
   bool bGearPadDown = false;
   double GearRefusedUntil = 0.0;
   bool bSpawned = false;
+  FString BlueprintId;
+  std::unique_ptr<FServerDriveReport> Report;
+  bool bLeftKeyDown = false;
+  bool bLeftPadDown = false;
+  bool bRightKeyDown = false;
+  bool bRightPadDown = false;
+  double SignalSince = 0.0;
+  bool bSignalTurned = false;
   EUpscaler Upscaler = EUpscaler::Tsr;
   bool bUpscalerKeyDown = false;
   FDelegateHandle FpsDrawHandle;
