@@ -17,9 +17,16 @@ class UCarlaEpisode;
 /// Settings for the server-side player vehicle, read from the command line:
 ///
 ///   -server-player                 spawn a vehicle driven from this window
-///   -server-player-vehicle=P       blueprint id or wildcard, default "vehicle.*"
-///                                  (cars only; a random match is picked)
+///   -server-player-vehicle=P       blueprint id or wildcard, default
+///                                  "vehicle.ue4.ford.crown", the car the
+///                                  mirrors are set up for (cars only; a
+///                                  random match is picked)
 ///   -server-player-seed=S          seed for the blueprint and spawn point
+///   -server-player-camera=MODE     starting camera: chase (the default),
+///                                  far, or interior
+///   -server-player-pitch=DEG       interior view pitch, degrees up (default 2,
+///                                  so the rear-view mirror is in frame);
+///                                  Page Up / Page Down adjust it while driving
 ///   -server-dlss[=MODE]            upscale the window with DLSS Super Resolution:
 ///                                  dlaa, quality (the default), balanced,
 ///                                  performance, or off (Unreal's TSR)
@@ -34,8 +41,10 @@ class UCarlaEpisode;
 struct FServerPlayerSettings
 {
   bool bEnabled = false;
-  FString Filter = TEXT("vehicle.*");
+  FString Filter = TEXT("vehicle.ue4.ford.crown");
   int32 Seed = 0;
+  FString Camera;
+  float InteriorPitch = 2.0f;
   /// Empty: leave the upscaler alone (TSR, unless the console changed it).
   FString Dlss;
   bool bSurround = false;
@@ -71,7 +80,9 @@ struct FServerPlayerSettings
 ///
 /// Each drive (a vehicle, from spawn to the end of the episode) is recorded
 /// by an FServerDriveReport: collisions and traffic violations, written as
-/// two CSV files to Reports on the desktop (or -server-reports=DIR).
+/// two CSV files to Reports on the desktop (or -server-reports=DIR), and its
+/// mirrors work (FServerMirrors) where Config/ServerPlayerMirrors.json
+/// says where the vehicle's mirror glass is.
 class FServerPlayer
 {
 public:

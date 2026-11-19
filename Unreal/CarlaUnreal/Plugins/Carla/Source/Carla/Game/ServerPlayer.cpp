@@ -14,6 +14,7 @@
 #include "Carla/Game/CarlaGameModeBase.h"
 #include "Carla/Game/CarlaStatics.h"
 #include "Carla/Game/ServerDriveReport.h"
+#include "Carla/Game/ServerMirrors.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "Carla/Vehicle/VehicleControl.h"
 #include "Carla/Vehicle/VehicleInputPriority.h"
@@ -40,6 +41,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "DynamicRHI.h"
+#include "RenderTimer.h"
 #include <util/ue-header-guard-end.h>
 
 #include <random>
@@ -57,6 +60,9 @@ FServerPlayerSettings FServerPlayerSettings::FromCommandLine()
   Settings.bEnabled = FParse::Param(CommandLine, TEXT("server-player"));
   FParse::Value(CommandLine, TEXT("-server-player-vehicle="), Settings.Filter);
   FParse::Value(CommandLine, TEXT("-server-player-seed="), Settings.Seed);
+  FParse::Value(CommandLine, TEXT("-server-player-camera="), Settings.Camera);
+  FParse::Value(CommandLine, TEXT("-server-player-pitch="), Settings.InteriorPitch);
+  Settings.InteriorPitch = FMath::Clamp(Settings.InteriorPitch, -30.0f, 30.0f);
   if (!FParse::Value(CommandLine, TEXT("-server-dlss="), Settings.Dlss) &&
       FParse::Param(CommandLine, TEXT("server-dlss")))
   {
@@ -191,11 +197,20 @@ public:
       }
       ApplyUpscaler();
     }
+    if (Settings.Camera.Equals(TEXT("interior"), ESearchCase::IgnoreCase))
+    {
+      CameraMode = ECameraMode::Interior;
+    }
+    else if (Settings.Camera.Equals(TEXT("far"), ESearchCase::IgnoreCase))
+    {
+      CameraMode = ECameraMode::FarChase;
+    }
   }
 
   ~FImpl()
   {
     Report.reset();
+    Mirrors.Reset();
     UDebugDrawService::Unregister(FpsDrawHandle);
     for (TWeakObjectPtr<ACameraActor> &SideCamera : SideCameras)
     {
@@ -224,6 +239,7 @@ public:
         UE_LOG(LogCarlaServerPlayer, Warning, TEXT("Server player: the vehicle was destroyed; spawning a new one"));
       }
       Report.reset(); // that drive is over
+      Mirrors.Reset();
       if (!Spawn())
       {
         bFailed = true;
@@ -231,6 +247,7 @@ public:
       }
       AttachCamera();
       Report = std::make_unique<FServerDriveReport>(Episode, *Vehicle, BlueprintId);
+      Mirrors = MakeUnique<FServerMirrors>(*Vehicle, BlueprintId);
       bSpawned = true;
     }
 
@@ -253,6 +270,10 @@ public:
     Drive(*Controller, DeltaSeconds);
     Signal(*Controller);
     Report->Tick();
+    // The mirrors are aimed from the driver's eye, and only render while
+    // the driver can see them.
+    Mirrors->Tick(Vehicle->GetActorTransform().TransformPosition(GetEyeLocation()),
+        CameraMode == ECameraMode::Interior);
     FollowWithSpectator(*Controller);
     DrawHud();
   }
@@ -624,11 +645,8 @@ private:
       {
         // The driver's eyes: left seat (UE's +Y is right), a little behind
         // the middle of the car, at about three quarters of its height.
-        SpringArm->SetRelativeLocation(FVector(
-            BoundsOrigin.X - 0.08f * BoundsExtent.X,
-            BoundsOrigin.Y - 0.36f * BoundsExtent.Y,
-            BoundsOrigin.Z + 0.5f * BoundsExtent.Z));
-        SpringArm->SetRelativeRotation(FRotator(-4.0f, 0.0f, 0.0f));
+        SpringArm->SetRelativeLocation(GetEyeLocation());
+        SpringArm->SetRelativeRotation(FRotator(Settings.InteriorPitch, 0.0f, 0.0f));
         SpringArm->TargetArmLength = 0.0f;
         SpringArm->SocketOffset = FVector::ZeroVector;
         SpringArm->bDoCollisionTest = false;
@@ -638,6 +656,17 @@ private:
         break;
       }
     }
+  }
+
+  /// The driver's eyes, in actor space: left seat (UE's +Y is right), a
+  /// little behind the middle of the car, at about three quarters of its
+  /// height.
+  FVector GetEyeLocation() const
+  {
+    return FVector(
+        BoundsOrigin.X - 0.08f * BoundsExtent.X,
+        BoundsOrigin.Y - 0.36f * BoundsExtent.Y,
+        BoundsOrigin.Z + 0.5f * BoundsExtent.Z);
   }
 
   void TakeView(APlayerController &Controller)
@@ -718,6 +747,16 @@ private:
   {
     ACarlaWheeledVehicle *Car = Vehicle.Get();
 
+    // Page Up / Page Down tilt the interior view, a degree at a time.
+    const bool bPitchUp = Pressed(Controller, EKeys::PageUp, bPitchUpKeyDown);
+    const bool bPitchDown = Pressed(Controller, EKeys::PageDown, bPitchDownKeyDown);
+    if ((bPitchUp || bPitchDown) && CameraMode == ECameraMode::Interior)
+    {
+      Settings.InteriorPitch = FMath::Clamp(Settings.InteriorPitch + (bPitchUp ? 1.0f : -1.0f), -30.0f, 30.0f);
+      ApplyCameraMode();
+      UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: interior pitch %.0f deg (-server-player-pitch=%.0f)"),
+          Settings.InteriorPitch, Settings.InteriorPitch);
+    }
     if (Pressed(Controller, EKeys::C, bCameraKeyDown) | Pressed(Controller, EKeys::Gamepad_FaceButton_Top, bCameraPadDown))
     {
       CameraMode = static_cast<ECameraMode>((static_cast<uint8>(CameraMode) + 1) % static_cast<uint8>(ECameraMode::Count));
@@ -880,10 +919,21 @@ private:
       FpsWindowStart = Now;
     }
     ++FpsFrames;
+    // Where the frame goes, as "stat unit" reports it (whose own readout
+    // falls off the monitors in surround): the game thread (simulation,
+    // traffic, physics), the render thread (draw calls), the GPU.
+    TimingSums[0] += FPlatformTime::ToMilliseconds(GGameThreadTime);
+    TimingSums[1] += FPlatformTime::ToMilliseconds(GRenderThreadTime);
+    TimingSums[2] += FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles());
     const double Elapsed = Now - FpsWindowStart;
     if (Elapsed >= FpsWindowSeconds)
     {
       Fps = FpsFrames / Elapsed;
+      for (int32 Index = 0; Index < 3; ++Index)
+      {
+        Timings[Index] = TimingSums[Index] / FpsFrames;
+        TimingSums[Index] = 0.0;
+      }
       FpsFrames = 0;
       FpsWindowStart = Now;
     }
@@ -915,6 +965,24 @@ private:
     Canvas->SetDrawColor(FColor::White);
     Canvas->DrawText(Font, UpscalerText, ViewWidth - Width * SmallScale - 24.0f, 16.0f + Height * Scale + 4.0f,
         SmallScale, SmallScale);
+
+    // The thread times, the slowest (what limits the frame rate) in yellow.
+    const TCHAR *Names[3] = {TEXT("game"), TEXT("draw"), TEXT("gpu")};
+    int32 Slowest = 0;
+    for (int32 Index = 1; Index < 3; ++Index)
+    {
+      Slowest = Timings[Index] > Timings[Slowest] ? Index : Slowest;
+    }
+    float X = ViewWidth - 24.0f;
+    const float Y = 16.0f + Height * Scale + 4.0f + Height * SmallScale + 2.0f;
+    for (int32 Index = 2; Index >= 0; --Index)
+    {
+      const FString Part = FString::Printf(TEXT("%s %.1f  "), Names[Index], Timings[Index]);
+      Canvas->StrLen(Font, Part, Width, Height);
+      X -= Width * SmallScale;
+      Canvas->SetDrawColor(Index == Slowest ? FColor::Yellow : FColor::White);
+      Canvas->DrawText(Font, Part, X, Y, SmallScale, SmallScale);
+    }
   }
 
   UCarlaEpisode &Episode;
@@ -931,6 +999,8 @@ private:
   float Steer = 0.0f;
   bool bReverse = false;
   bool bCameraKeyDown = false;
+  bool bPitchUpKeyDown = false;
+  bool bPitchDownKeyDown = false;
   bool bCameraPadDown = false;
   bool bResetKeyDown = false;
   bool bResetPadDown = false;
@@ -940,6 +1010,7 @@ private:
   bool bSpawned = false;
   FString BlueprintId;
   std::unique_ptr<FServerDriveReport> Report;
+  TUniquePtr<FServerMirrors> Mirrors;
   bool bLeftKeyDown = false;
   bool bLeftPadDown = false;
   bool bRightKeyDown = false;
@@ -960,6 +1031,8 @@ private:
   double FpsWindowStart = 0.0;
   int32 FpsFrames = 0;
   double Fps = 0.0;
+  double TimingSums[3] = {0.0, 0.0, 0.0};
+  double Timings[3] = {0.0, 0.0, 0.0};
   bool bFailed = false;
 };
 
