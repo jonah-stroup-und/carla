@@ -58,6 +58,9 @@ namespace
     float ViewDistance = 15000.0f;
     float LodFactor = 2.0f;
     bool bLumen = true;
+    /// The blind-spot indicator this mirror shows: 0 left, 1 right, -1 none.
+    int32 BlindSpotSide = -1;
+    FVector Icon = FVector(0.12, 0.2, 0.12);
   };
 
   bool ReadVector(const TSharedPtr<FJsonObject> &Object, const TCHAR *Field, FVector &Out)
@@ -164,6 +167,23 @@ public:
     }
   }
 
+  void SetBlindSpot(float Left, float Right)
+  {
+    BlindSpotLevels[0] = Left;
+    BlindSpotLevels[1] = Right;
+    for (FMirror &Mirror : Mirrors)
+    {
+      const int32 Side = Mirror.Settings.BlindSpotSide;
+      UMaterialInstanceDynamic *Instance = Mirror.Instance.Get();
+      if (Side < 0 || Instance == nullptr || Mirror.Warning == BlindSpotLevels[Side])
+      {
+        continue;
+      }
+      Mirror.Warning = BlindSpotLevels[Side];
+      Instance->SetScalarParameterValue(TEXT("Warning"), Mirror.Warning);
+    }
+  }
+
 private:
 
   struct FMirror
@@ -175,6 +195,7 @@ private:
     TWeakObjectPtr<USceneCaptureComponent2D> Capture;
     TStrongObjectPtr<UTextureRenderTarget2D> Target;
     TStrongObjectPtr<UMaterialInstanceDynamic> Instance;
+    float Warning = 0.0f;
   };
 
   void Reload()
@@ -258,6 +279,13 @@ private:
       ReadFloat(*Object, TEXT("view_distance"), Mirror.ViewDistance);
       ReadFloat(*Object, TEXT("lod_factor"), Mirror.LodFactor);
       (*Object)->TryGetBoolField(TEXT("lumen"), Mirror.bLumen);
+      FString BlindSpot;
+      if ((*Object)->TryGetStringField(TEXT("blind_spot"), BlindSpot))
+      {
+        Mirror.BlindSpotSide = BlindSpot.Equals(TEXT("left"), ESearchCase::IgnoreCase) ? 0
+            : (BlindSpot.Equals(TEXT("right"), ESearchCase::IgnoreCase) ? 1 : -1);
+      }
+      ReadVector(*Object, TEXT("icon"), Mirror.Icon);
       Out.Add(Mirror);
     }
     return true;
@@ -303,6 +331,12 @@ private:
     Instance->SetScalarParameterValue(TEXT("FlipV"), Settings.FlipV);
     Instance->SetScalarParameterValue(TEXT("SwapUV"), Settings.SwapUV);
     Instance->SetScalarParameterValue(TEXT("Brightness"), Settings.Brightness);
+    // The blind-spot icon, round on the glass: the image is Width x Height.
+    Instance->SetVectorParameterValue(TEXT("IconCenter"), FLinearColor(Settings.Icon.X, Settings.Icon.Y, 0.0f));
+    Instance->SetScalarParameterValue(TEXT("IconRadius"), Settings.Icon.Z);
+    Instance->SetScalarParameterValue(TEXT("Aspect"), static_cast<float>(Width) / Height);
+    Mirror.Warning = Settings.BlindSpotSide >= 0 ? BlindSpotLevels[Settings.BlindSpotSide] : 0.0f;
+    Instance->SetScalarParameterValue(TEXT("Warning"), Mirror.Warning);
     Mirror.Instance.Reset(Instance);
 
     // The panel: the plane's +Z on the glass normal, its X up the glass.
@@ -415,6 +449,7 @@ private:
   FDateTime ConfigStamp;
   double LastReloadCheck = 0.0;
   int32 NextCapture = 0;
+  float BlindSpotLevels[2] = {0.0f, 0.0f};
   TStrongObjectPtr<UMaterialInterface> Material;
   TStrongObjectPtr<UStaticMesh> Plane;
   TArray<FMirror> Mirrors;
@@ -438,4 +473,9 @@ FServerMirrors::~FServerMirrors() = default;
 void FServerMirrors::Tick(const FVector &EyeLocation, bool bCapture)
 {
   Impl->Tick(EyeLocation, bCapture);
+}
+
+void FServerMirrors::SetBlindSpot(float Left, float Right)
+{
+  Impl->SetBlindSpot(Left, Right);
 }

@@ -10,6 +10,8 @@
 #include "CoreMinimal.h"
 #include <util/ue-header-guard-end.h>
 
+#include "Carla/Game/ServerWarning.h"
+
 #include <memory>
 
 class UCarlaEpisode;
@@ -30,6 +32,18 @@ class UCarlaEpisode;
 ///   -server-dlss[=MODE]            upscale the window with DLSS Super Resolution:
 ///                                  dlaa, quality (the default), balanced,
 ///                                  performance, or off (Unreal's TSR)
+///   -server-blind-spot=MODE        the blind-spot monitor: off, visual (the
+///                                  default: an indicator in each side mirror),
+///                                  or audio (the indicator, and a chime on
+///                                  signalling towards an occupied side);
+///                                  B cycles them while driving
+///   -server-pillars=MODE           the A-pillar monitor: a light on each
+///                                  A-pillar while it hides a road user; off,
+///                                  visual (the default) or audio (the light,
+///                                  and a low chime as one disappears behind
+///                                  it); P cycles them while driving
+///   -server-blind-spot-test        light the mirror and A-pillar indicators,
+///                                  to line them up
 ///   -server-reports=DIR            where the drive reports go, default Reports
 ///                                  on the desktop
 ///   -server-surround[=FOV]         spread the window over three side-by-side
@@ -49,6 +63,9 @@ struct FServerPlayerSettings
   FString Dlss;
   bool bSurround = false;
   float SurroundFov = 60.0f;
+  EServerWarningMode BlindSpot = EServerWarningMode::Visual;
+  EServerWarningMode Pillars = EServerWarningMode::Visual;
+  bool bWarningTest = false;
 
   bool IsEnabled() const { return bEnabled; }
 
@@ -74,6 +91,8 @@ struct FServerPlayerSettings
 /// Keyboard: W/Up throttle, S/Down brake, Q drive/reverse (when nearly
 /// stopped), A/D or Left/Right steer, Z/X left/right turn signal, Space
 /// handbrake, C camera (chase, far chase, interior), Backspace reset upright,
+/// B cycles the blind-spot monitor (off, visual, visual + audio), P the
+/// A-pillar monitor,
 /// F9 cycles the upscaler (TSR, DLAA, DLSS Quality, Balanced, Performance).
 /// Gamepad: right/left trigger throttle and brake, X drive/reverse, left
 /// stick steer, d-pad left/right turn signal, A handbrake, Y camera, Back reset.
@@ -82,7 +101,10 @@ struct FServerPlayerSettings
 /// by an FServerDriveReport: collisions and traffic violations, written as
 /// two CSV files to Reports on the desktop (or -server-reports=DIR), and its
 /// mirrors work (FServerMirrors) where Config/ServerPlayerMirrors.json
-/// says where the vehicle's mirror glass is.
+/// says where the vehicle's mirror glass is. Its blind-spot monitor
+/// (FServerBlindSpot) lights an indicator in the side mirror, or on the HUD
+/// outside the interior camera; its A-pillar monitor (FServerPillars) lights
+/// a light on the pillar hiding a road user.
 class FServerPlayer
 {
 public:

@@ -45,6 +45,11 @@ class ACarlaWheeledVehicle;
 ///                 Lumen (default true, like the main view; measured no
 ///                 clear saving, and a visibly darker mirror)
 ///   "flip_u", "flip_v", "swap_uv", "brightness": material parameters
+///   "blind_spot": "left" or "right": this mirror shows that side's
+///                 blind-spot indicator (FServerBlindSpot)
+///   "icon":       [u, v, radius] where the indicator is, in the mirror
+///                 image's texture coordinates (0 to 1 across its width and
+///                 height; radius as a fraction of the height)
 class FServerMirrors
 {
 public:
@@ -60,6 +65,10 @@ public:
   /// Aims the captures from the driver's eye (world space); they only render
   /// while bCapture is set, e.g. in the interior camera.
   void Tick(const FVector &EyeLocation, bool bCapture);
+
+  /// The blind-spot indicators' brightness, 0 (off) to 1, on the mirrors
+  /// marked "blind_spot".
+  void SetBlindSpot(float Left, float Right);
 
 private:
 

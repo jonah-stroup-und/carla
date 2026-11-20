@@ -13,8 +13,10 @@
 #include "Carla/Game/CarlaEpisode.h"
 #include "Carla/Game/CarlaGameModeBase.h"
 #include "Carla/Game/CarlaStatics.h"
+#include "Carla/Game/ServerBlindSpot.h"
 #include "Carla/Game/ServerDriveReport.h"
 #include "Carla/Game/ServerMirrors.h"
+#include "Carla/Game/ServerPillars.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "Carla/Vehicle/VehicleControl.h"
 #include "Carla/Vehicle/VehicleInputPriority.h"
@@ -77,6 +79,17 @@ FServerPlayerSettings FServerPlayerSettings::FromCommandLine()
     Settings.bSurround = FParse::Param(CommandLine, TEXT("server-surround"));
   }
   Settings.SurroundFov = FMath::Clamp(Settings.SurroundFov, 20.0f, 120.0f);
+  const auto ReadMode = [CommandLine](const TCHAR *Flag, EServerWarningMode &Mode) {
+    FString Text;
+    if (FParse::Value(CommandLine, Flag, Text) && !ParseServerWarningMode(Text, Mode))
+    {
+      UE_LOG(LogCarlaServerPlayer, Warning, TEXT("Server player: unknown %s%s (off, visual, audio); using %s"),
+          Flag, *Text, GetServerWarningModeName(Mode));
+    }
+  };
+  ReadMode(TEXT("-server-blind-spot="), Settings.BlindSpot);
+  ReadMode(TEXT("-server-pillars="), Settings.Pillars);
+  Settings.bWarningTest = FParse::Param(CommandLine, TEXT("server-blind-spot-test"));
   return Settings;
 }
 
@@ -210,6 +223,8 @@ public:
   ~FImpl()
   {
     Report.reset();
+    BlindSpot.Reset();
+    Pillars.Reset();
     Mirrors.Reset();
     UDebugDrawService::Unregister(FpsDrawHandle);
     for (TWeakObjectPtr<ACameraActor> &SideCamera : SideCameras)
@@ -239,6 +254,8 @@ public:
         UE_LOG(LogCarlaServerPlayer, Warning, TEXT("Server player: the vehicle was destroyed; spawning a new one"));
       }
       Report.reset(); // that drive is over
+      BlindSpot.Reset();
+      Pillars.Reset();
       Mirrors.Reset();
       if (!Spawn())
       {
@@ -248,6 +265,15 @@ public:
       AttachCamera();
       Report = std::make_unique<FServerDriveReport>(Episode, *Vehicle, BlueprintId);
       Mirrors = MakeUnique<FServerMirrors>(*Vehicle, BlueprintId);
+      BlindSpot = MakeUnique<FServerBlindSpot>(*Vehicle, BoundsOrigin, BoundsExtent, GetEyeLocation().X, Settings.BlindSpot);
+      BlindSpot->SetTest(Settings.bWarningTest);
+      Pillars = MakeUnique<FServerPillars>(*Vehicle, BlueprintId, Settings.Pillars);
+      Pillars->SetTest(Settings.bWarningTest);
+      Report->SetAidMode(BlindSpotAid, GetServerWarningModeName(Settings.BlindSpot));
+      if (Pillars->HasPillars())
+      {
+        Report->SetAidMode(PillarAid, GetServerWarningModeName(Settings.Pillars));
+      }
       bSpawned = true;
     }
 
@@ -269,6 +295,8 @@ public:
     }
     Drive(*Controller, DeltaSeconds);
     Signal(*Controller);
+    MonitorBlindSpot(*Controller, DeltaSeconds);
+    MonitorPillars(*Controller, DeltaSeconds);
     Report->Tick();
     // The mirrors are aimed from the driver's eye, and only render while
     // the driver can see them.
@@ -862,6 +890,61 @@ private:
     }
   }
 
+  /// B cycles the monitor's mode; a turn signal towards an occupied side is
+  /// reported whatever the mode, so drives with and without it compare.
+  void MonitorBlindSpot(APlayerController &Controller, float DeltaSeconds)
+  {
+    if (Pressed(Controller, EKeys::B, bBlindSpotKeyDown))
+    {
+      Settings.BlindSpot = NextServerWarningMode(Settings.BlindSpot);
+      BlindSpot->SetMode(Settings.BlindSpot);
+      Report->SetAidMode(BlindSpotAid, GetServerWarningModeName(Settings.BlindSpot));
+      UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: blind-spot monitor %s"), GetServerWarningModeName(Settings.BlindSpot));
+    }
+    const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
+    const int32 Started = BlindSpot->Tick(DeltaSeconds, Lights.LeftBlinker, Lights.RightBlinker);
+    for (int32 Side = 0; Side < 2; ++Side)
+    {
+      if ((Started & (1 << Side)) == 0)
+      {
+        continue;
+      }
+      Report->AddInfo(TEXT("Signalled into occupied blind spot"),
+          FString::Printf(TEXT("%s side, %s"), Side == FServerBlindSpot::Left ? TEXT("left") : TEXT("right"), DescribeWarning(Settings.BlindSpot)),
+          BlindSpot->GetOccupant(Side));
+    }
+    Mirrors->SetBlindSpot(BlindSpot->GetIndicator(FServerBlindSpot::Left), BlindSpot->GetIndicator(FServerBlindSpot::Right));
+  }
+
+  /// P cycles the A-pillar monitor's mode; a pedestrian or cyclist going
+  /// behind a pillar is reported whatever the mode.
+  void MonitorPillars(APlayerController &Controller, float DeltaSeconds)
+  {
+    if (Pressed(Controller, EKeys::P, bPillarsKeyDown))
+    {
+      Settings.Pillars = NextServerWarningMode(Settings.Pillars);
+      Pillars->SetMode(Settings.Pillars);
+      Report->SetAidMode(PillarAid, GetServerWarningModeName(Settings.Pillars));
+      UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: A-pillar monitor %s"), GetServerWarningModeName(Settings.Pillars));
+    }
+    for (const FServerPillars::FHidden &Hidden : Pillars->Tick(DeltaSeconds))
+    {
+      Report->AddInfo(TEXT("Hidden by A-pillar"),
+          FString::Printf(TEXT("%s pillar, %s"), Hidden.Side == FServerPillars::Left ? TEXT("left") : TEXT("right"), DescribeWarning(Settings.Pillars)),
+          Hidden.Actor.Get());
+    }
+  }
+
+  static const TCHAR *DescribeWarning(EServerWarningMode Mode)
+  {
+    switch (Mode)
+    {
+      case EServerWarningMode::Off:    return TEXT("not warned (monitor off)");
+      case EServerWarningMode::Visual: return TEXT("warned: indicator");
+      default:                         return TEXT("warned: indicator and chime");
+    }
+  }
+
   void ResetUpright(ACarlaWheeledVehicle &Car)
   {
     const FRotator Yaw(0.0f, Car.GetActorRotation().Yaw, 0.0f);
@@ -887,10 +970,16 @@ private:
     HudColor = bRefused ? FColor::Orange : FColor::White;
     const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
     const TCHAR *SignalText = Lights.LeftBlinker ? TEXT("<< ") : (Lights.RightBlinker ? TEXT(" >>") : TEXT(" - "));
-    HudText = FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    reset [Backspace]    violations: %d"),
+    HudText = FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    blind spot: %s [B]    A-pillars: %s [P]    reset [Backspace]    violations: %d"),
             FMath::Abs(SpeedKmh), bReverse ? TEXT("R") : TEXT("D"),
             bRefused ? TEXT(" (stop to shift)") : TEXT(""), SignalText, CameraModeName(CameraMode),
+            GetServerWarningModeName(Settings.BlindSpot), GetServerWarningModeName(Settings.Pillars),
             Report ? Report->GetViolationCount() : 0);
+    // Outside the car the mirrors are not in view: the indicators go on the HUD.
+    BlindSpotHud[0] = CameraMode != ECameraMode::Interior && BlindSpot ? BlindSpot->GetIndicator(FServerBlindSpot::Left) : 0.0f;
+    BlindSpotHud[1] = CameraMode != ECameraMode::Interior && BlindSpot ? BlindSpot->GetIndicator(FServerBlindSpot::Right) : 0.0f;
+    PillarHud[0] = CameraMode != ECameraMode::Interior && Pillars ? Pillars->GetIndicator(FServerPillars::Left) : 0.0f;
+    PillarHud[1] = CameraMode != ECameraMode::Interior && Pillars ? Pillars->GetIndicator(FServerPillars::Right) : 0.0f;
   }
 
   /// Top-right frame counter: rendered frames per second, averaged over
@@ -912,6 +1001,25 @@ private:
     {
       Canvas->SetDrawColor(HudColor);
       Canvas->DrawText(GEngine->GetMediumFont(), HudText, 24.0f, 16.0f, 1.3f, 1.3f);
+    }
+    for (int32 Index = 0; Index < 4; ++Index)
+    {
+      const int32 Side = Index % 2;
+      const bool bPillar = Index >= 2;
+      const float Level = bPillar ? PillarHud[Side] : BlindSpotHud[Side];
+      if (Level <= 0.0f)
+      {
+        continue;
+      }
+      const FString Text = bPillar ? (Side == FServerPillars::Left ? TEXT("<< A-PILLAR") : TEXT("A-PILLAR >>"))
+          : (Side == FServerBlindSpot::Left ? TEXT("<< BLIND SPOT") : TEXT("BLIND SPOT >>"));
+      float TextWidth = 0.0f;
+      float TextHeight = 0.0f;
+      Canvas->StrLen(GEngine->GetMediumFont(), Text, TextWidth, TextHeight);
+      const float Scale = 2.0f;
+      const float X = Side == FServerBlindSpot::Left ? 24.0f : ViewWidth - TextWidth * Scale - 24.0f;
+      Canvas->SetDrawColor(FLinearColor(1.0f, 0.42f, 0.02f, Level).ToFColor(true));
+      Canvas->DrawText(GEngine->GetMediumFont(), Text, X, Canvas->ClipY * 0.5f + (bPillar ? TextHeight * Scale * 1.3f : 0.0f), Scale, Scale);
     }
     const double Now = FPlatformTime::Seconds();
     if (FpsWindowStart == 0.0)
@@ -1011,6 +1119,15 @@ private:
   FString BlueprintId;
   std::unique_ptr<FServerDriveReport> Report;
   TUniquePtr<FServerMirrors> Mirrors;
+  TUniquePtr<FServerBlindSpot> BlindSpot;
+  bool bBlindSpotKeyDown = false;
+  float BlindSpotHud[2] = {0.0f, 0.0f};
+  TUniquePtr<FServerPillars> Pillars;
+  bool bPillarsKeyDown = false;
+  float PillarHud[2] = {0.0f, 0.0f};
+  /// The drive report's names for the driver aids.
+  const FString BlindSpotAid = TEXT("Blind-spot monitor");
+  const FString PillarAid = TEXT("A-pillar monitor");
   bool bLeftKeyDown = false;
   bool bLeftPadDown = false;
   bool bRightKeyDown = false;

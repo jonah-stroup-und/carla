@@ -48,7 +48,8 @@ public:
 /// objects (one per contact, with its peak impulse and duration); speeding
 /// (one per stretch above the limit, with its peak); running a red light;
 /// crossing a solid line; changing lanes over a broken line without a turn
-/// signal. Locations are CARLA's (meters).
+/// signal; the driver aids' modes, each turn signal towards an occupied blind
+/// spot, and each pedestrian or cyclist hidden behind an A-pillar. Locations are CARLA's (meters).
 ///
 /// Both files are rewritten every few seconds while driving, so a crash or a
 /// killed process loses at most that much, and once more when the drive ends.
@@ -76,6 +77,15 @@ public:
   double GetLastSignalledLaneChange() const { return LastSignalledLaneChange; }
 
   void OnHit(AActor *OtherActor, const FVector &NormalImpulse, const FHitResult &Hit);
+
+  /// A driver aid's mode, e.g. ("Blind-spot monitor", "visual"): logged
+  /// when it changes, and the summary gives the one in use (or "mixed" when
+  /// it changed during the drive).
+  void SetAidMode(const FString &Aid, const FString &Mode);
+
+  /// An informational event, e.g. a turn signal towards an occupied blind
+  /// spot, with the road user involved.
+  void AddInfo(const TCHAR *Name, const FString &Details, const AActor *Other);
 
 private:
 
@@ -144,4 +154,11 @@ private:
   double LastSignalledLaneChange = -1.0;
 
   TWeakObjectPtr<ATrafficLightBase> TrafficLight;
+
+  struct FAidMode
+  {
+    FString Mode;
+    bool bMixed = false;
+  };
+  TMap<FString, FAidMode> AidModes;
 };

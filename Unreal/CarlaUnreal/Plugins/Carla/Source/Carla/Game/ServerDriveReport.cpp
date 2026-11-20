@@ -514,6 +514,31 @@ void FServerDriveReport::TrackTrafficLight()
   Add(MoveTemp(Event));
 }
 
+void FServerDriveReport::SetAidMode(const FString &Aid, const FString &Mode)
+{
+  FAidMode &Current = AidModes.FindOrAdd(Aid);
+  if (Mode == Current.Mode)
+  {
+    return;
+  }
+  Current.bMixed = Current.bMixed || !Current.Mode.IsEmpty();
+  Current.Mode = Mode;
+  FEvent Event = MakeEvent(*Aid, false);
+  Event.Details = Mode;
+  Add(Event);
+}
+
+void FServerDriveReport::AddInfo(const TCHAR *Name, const FString &Details, const AActor *Other)
+{
+  FEvent Event = MakeEvent(Name, false);
+  Event.Details = Details;
+  if (Other != nullptr)
+  {
+    Event.OtherActor = DescribeActor(*Other);
+  }
+  Add(Event);
+}
+
 FString FServerDriveReport::DescribeActor(const AActor &Actor) const
 {
   const FCarlaActor *View = Episode.FindCarlaActor(const_cast<AActor *>(&Actor));
@@ -601,6 +626,10 @@ void FServerDriveReport::Write()
   Summary += TEXT("Distance (km),") + Number(DistanceMeters / 1000.0, 2) + TEXT("\n");
   Summary += TEXT("Average speed (km/h),") + Number(AverageKmh, 0) + TEXT("\n");
   Summary += TEXT("Violations,") + FString::FromInt(Violations) + TEXT("\n");
+  for (const auto &Pair : AidModes)
+  {
+    Summary += Csv(Pair.Key) + TEXT(",") + Csv(Pair.Value.bMixed ? FString(TEXT("mixed")) : Pair.Value.Mode) + TEXT("\n");
+  }
   Counts.KeySort([](const FString &A, const FString &B) { return A < B; });
   for (const auto &Pair : Counts)
   {
