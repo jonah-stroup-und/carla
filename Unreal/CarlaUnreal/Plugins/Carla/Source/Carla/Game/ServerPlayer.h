@@ -24,22 +24,22 @@ class UCarlaEpisode;
 ///                                  mirrors are set up for (cars only; a
 ///                                  random match is picked)
 ///   -server-player-seed=S          seed for the blueprint and spawn point
-///   -server-player-camera=MODE     starting camera: chase (the default),
-///                                  far, or interior
+///   -server-player-camera=MODE     starting camera: interior (the default,
+///                                  the driver's seat), chase or far
 ///   -server-player-pitch=DEG       interior view pitch, degrees up (default 2,
 ///                                  so the rear-view mirror is in frame);
 ///                                  Page Up / Page Down adjust it while driving
 ///   -server-dlss[=MODE]            upscale the window with DLSS Super Resolution:
 ///                                  dlaa, quality (the default), balanced,
 ///                                  performance, or off (Unreal's TSR)
-///   -server-blind-spot=MODE        the blind-spot monitor: off, visual (the
-///                                  default: an indicator in each side mirror),
-///                                  or audio (the indicator, and a chime on
+///   -server-blind-spot=MODE        the blind-spot monitor: off (the
+///                                  default), visual (an indicator in each side
+///                                  mirror) or audio (the indicator, and a chime on
 ///                                  signalling towards an occupied side);
 ///                                  B cycles them while driving
 ///   -server-pillars=MODE           the A-pillar monitor: a light on each
-///                                  A-pillar while it hides a road user; off,
-///                                  visual (the default) or audio (the light,
+///                                  A-pillar while it hides a road user; off
+///                                  (the default), visual or audio (the light,
 ///                                  and a low chime as one disappears behind
 ///                                  it); P cycles them while driving
 ///   -server-blind-spot-test        light the mirror and A-pillar indicators,
@@ -63,8 +63,8 @@ struct FServerPlayerSettings
   FString Dlss;
   bool bSurround = false;
   float SurroundFov = 60.0f;
-  EServerWarningMode BlindSpot = EServerWarningMode::Visual;
-  EServerWarningMode Pillars = EServerWarningMode::Visual;
+  EServerWarningMode BlindSpot = EServerWarningMode::Off;
+  EServerWarningMode Pillars = EServerWarningMode::Off;
   bool bWarningTest = false;
 
   bool IsEnabled() const { return bEnabled; }
@@ -92,7 +92,7 @@ struct FServerPlayerSettings
 /// stopped), A/D or Left/Right steer, Z/X left/right turn signal, Space
 /// handbrake, C camera (chase, far chase, interior), Backspace reset upright,
 /// B cycles the blind-spot monitor (off, visual, visual + audio), P the
-/// A-pillar monitor,
+/// A-pillar monitor, Esc twice (within 3 s) quits,
 /// F9 cycles the upscaler (TSR, DLAA, DLSS Quality, Balanced, Performance).
 /// Gamepad: right/left trigger throttle and brake, X drive/reverse, left
 /// stick steer, d-pad left/right turn signal, A handbrake, Y camera, Back reset.

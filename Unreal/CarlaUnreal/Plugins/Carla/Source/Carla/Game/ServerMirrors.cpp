@@ -152,7 +152,7 @@ public:
         continue;
       }
       const FTransform MeshTransform = Parent->GetComponentTransform();
-      Capture->bCaptureEveryFrame = bCapture && Index == NextCapture;
+      Capture->bCaptureEveryFrame = bCapture && (bEveryFrame || Index == NextCapture);
       if (!Capture->bCaptureEveryFrame)
       {
         continue;
@@ -226,7 +226,7 @@ private:
     UE_LOG(LogCarlaServerMirrors, Log, TEXT("Mirrors: %d for %s from %s"), Mirrors.Num(), *BlueprintId, *ConfigPath);
   }
 
-  bool ReadConfig(TArray<FMirrorSettings> &Out) const
+  bool ReadConfig(TArray<FMirrorSettings> &Out)
   {
     FString Text;
     if (!FFileHelper::LoadFileToString(Text, *ConfigPath))
@@ -242,7 +242,26 @@ private:
     }
     const TSharedPtr<FJsonObject> *Vehicle = nullptr;
     const TArray<TSharedPtr<FJsonValue>> *Entries = nullptr;
-    if (!Root->TryGetObjectField(BlueprintId, Vehicle) || !(*Vehicle)->TryGetArrayField(TEXT("mirrors"), Entries))
+    Eye.Reset();
+    MirrorEye.Reset();
+    Mesh.Reset();
+    bEveryFrame = false;
+    if (Root->TryGetObjectField(BlueprintId, Vehicle))
+    {
+      FVector Value;
+      if (ReadVector(*Vehicle, TEXT("eye"), Value))
+      {
+        Eye = Value;
+        UE_LOG(LogCarlaServerMirrors, Log, TEXT("Mirrors: driver's eye at %s"), *Value.ToString());
+      }
+      if (ReadVector(*Vehicle, TEXT("mirror_eye"), Value))
+      {
+        MirrorEye = Value;
+      }
+      (*Vehicle)->TryGetStringField(TEXT("mesh"), Mesh);
+      (*Vehicle)->TryGetBoolField(TEXT("mirrors_every_frame"), bEveryFrame);
+    }
+    if (Vehicle == nullptr || !(*Vehicle)->TryGetArrayField(TEXT("mirrors"), Entries))
     {
       UE_LOG(LogCarlaServerMirrors, Log, TEXT("Mirrors: %s has no entry for %s; no mirrors"), *ConfigPath, *BlueprintId);
       Out.Reset();
@@ -453,6 +472,13 @@ private:
   TStrongObjectPtr<UMaterialInterface> Material;
   TStrongObjectPtr<UStaticMesh> Plane;
   TArray<FMirror> Mirrors;
+
+public:
+
+  TOptional<FVector> Eye;
+  TOptional<FVector> MirrorEye;
+  FString Mesh;
+  bool bEveryFrame = false;
 };
 
 FString FServerMirrors::GetConfigPath()
@@ -478,4 +504,29 @@ void FServerMirrors::Tick(const FVector &EyeLocation, bool bCapture)
 void FServerMirrors::SetBlindSpot(float Left, float Right)
 {
   Impl->SetBlindSpot(Left, Right);
+}
+
+bool FServerMirrors::GetEye(FVector &Eye) const
+{
+  if (Impl->Eye.IsSet())
+  {
+    Eye = Impl->Eye.GetValue();
+    return true;
+  }
+  return false;
+}
+
+FString FServerMirrors::GetMesh() const
+{
+  return Impl->Mesh;
+}
+
+bool FServerMirrors::GetMirrorEye(FVector &MirrorEye) const
+{
+  if (Impl->MirrorEye.IsSet())
+  {
+    MirrorEye = Impl->MirrorEye.GetValue();
+    return true;
+  }
+  return GetEye(MirrorEye);
 }

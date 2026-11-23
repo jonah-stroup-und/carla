@@ -26,6 +26,8 @@
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Debug/DebugDrawService.h"
 #include "Engine/Canvas.h"
 #include "Engine/Font.h"
@@ -210,9 +212,11 @@ public:
       }
       ApplyUpscaler();
     }
-    if (Settings.Camera.Equals(TEXT("interior"), ESearchCase::IgnoreCase))
+    // The driver's seat unless asked otherwise.
+    CameraMode = ECameraMode::Interior;
+    if (Settings.Camera.Equals(TEXT("chase"), ESearchCase::IgnoreCase))
     {
-      CameraMode = ECameraMode::Interior;
+      CameraMode = ECameraMode::Chase;
     }
     else if (Settings.Camera.Equals(TEXT("far"), ESearchCase::IgnoreCase))
     {
@@ -265,6 +269,7 @@ public:
       AttachCamera();
       Report = std::make_unique<FServerDriveReport>(Episode, *Vehicle, BlueprintId);
       Mirrors = MakeUnique<FServerMirrors>(*Vehicle, BlueprintId);
+      SwapMesh(Mirrors->GetMesh());
       BlindSpot = MakeUnique<FServerBlindSpot>(*Vehicle, BoundsOrigin, BoundsExtent, GetEyeLocation().X, Settings.BlindSpot);
       BlindSpot->SetTest(Settings.bWarningTest);
       Pillars = MakeUnique<FServerPillars>(*Vehicle, BlueprintId, Settings.Pillars);
@@ -300,8 +305,14 @@ public:
     Report->Tick();
     // The mirrors are aimed from the driver's eye, and only render while
     // the driver can see them.
-    Mirrors->Tick(Vehicle->GetActorTransform().TransformPosition(GetEyeLocation()),
+    Mirrors->Tick(Vehicle->GetActorTransform().TransformPosition(GetMirrorEyeLocation()),
         CameraMode == ECameraMode::Interior);
+    // The config's eye can move while driving.
+    if (CameraMode == ECameraMode::Interior && Arm.IsValid() &&
+        !Arm->GetRelativeLocation().Equals(GetEyeLocation(), 0.01))
+    {
+      Arm->SetRelativeLocation(GetEyeLocation());
+    }
     FollowWithSpectator(*Controller);
     DrawHud();
   }
@@ -686,15 +697,56 @@ private:
     }
   }
 
-  /// The driver's eyes, in actor space: left seat (UE's +Y is right), a
-  /// little behind the middle of the car, at about three quarters of its
-  /// height.
+  /// The driver's eyes, in actor space: the vehicle's "eye" in the mirror
+  /// config, else the left seat (UE's +Y is right), a little behind the
+  /// middle of the car, at about three quarters of its height.
   FVector GetEyeLocation() const
+  {
+    FVector Eye;
+    if (Mirrors && Mirrors->GetEye(Eye))
+    {
+      return Eye;
+    }
+    return GetDefaultEyeLocation();
+  }
+
+  /// The eye the mirrors are aimed from: the config's "mirror_eye", else
+  /// the driver's eye.
+  FVector GetMirrorEyeLocation() const
+  {
+    FVector Eye;
+    if (Mirrors && Mirrors->GetMirrorEye(Eye))
+    {
+      return Eye;
+    }
+    return GetDefaultEyeLocation();
+  }
+
+  FVector GetDefaultEyeLocation() const
   {
     return FVector(
         BoundsOrigin.X - 0.08f * BoundsExtent.X,
         BoundsOrigin.Y - 0.36f * BoundsExtent.Y,
         BoundsOrigin.Z + 0.5f * BoundsExtent.Z);
+  }
+
+  /// Swaps the car's skeletal mesh for the config's "mesh" (e.g. one without
+  /// the front headrests), keeping its materials.
+  void SwapMesh(const FString &Path)
+  {
+    ACarlaWheeledVehicle *Car = Vehicle.Get();
+    if (Path.IsEmpty() || Car == nullptr)
+    {
+      return;
+    }
+    USkeletalMesh *Mesh = LoadObject<USkeletalMesh>(nullptr, *Path);
+    if (Mesh == nullptr)
+    {
+      UE_LOG(LogCarlaServerPlayer, Warning, TEXT("Server player: cannot load mesh %s; keeping the vehicle's"), *Path);
+      return;
+    }
+    Car->GetMesh()->SetSkeletalMeshAsset(Mesh);
+    UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: car mesh %s"), *Path);
   }
 
   void TakeView(APlayerController &Controller)
@@ -789,6 +841,19 @@ private:
     {
       CameraMode = static_cast<ECameraMode>((static_cast<uint8>(CameraMode) + 1) % static_cast<uint8>(ECameraMode::Count));
       ApplyCameraMode();
+    }
+    // Esc twice within a few seconds closes the game (the drive report is
+    // written on the way out).
+    if (Pressed(Controller, EKeys::Escape, bQuitKeyDown))
+    {
+      const double Now = FPlatformTime::Seconds();
+      if (Now - QuitPromptTime <= QuitConfirmSeconds)
+      {
+        UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: Esc pressed twice; quitting"));
+        Controller.ConsoleCommand(TEXT("quit"));
+        return;
+      }
+      QuitPromptTime = Now;
     }
     if (Pressed(Controller, EKeys::BackSpace, bResetKeyDown) | Pressed(Controller, EKeys::Gamepad_Special_Left, bResetPadDown))
     {
@@ -970,7 +1035,7 @@ private:
     HudColor = bRefused ? FColor::Orange : FColor::White;
     const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
     const TCHAR *SignalText = Lights.LeftBlinker ? TEXT("<< ") : (Lights.RightBlinker ? TEXT(" >>") : TEXT(" - "));
-    HudText = FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    blind spot: %s [B]    A-pillars: %s [P]    reset [Backspace]    violations: %d"),
+    HudText = FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    blind spot: %s [B]    A-pillars: %s [P]    reset [Backspace]    quit [Esc]    violations: %d"),
             FMath::Abs(SpeedKmh), bReverse ? TEXT("R") : TEXT("D"),
             bRefused ? TEXT(" (stop to shift)") : TEXT(""), SignalText, CameraModeName(CameraMode),
             GetServerWarningModeName(Settings.BlindSpot), GetServerWarningModeName(Settings.Pillars),
@@ -1022,6 +1087,17 @@ private:
       Canvas->DrawText(GEngine->GetMediumFont(), Text, X, Canvas->ClipY * 0.5f + (bPillar ? TextHeight * Scale * 1.3f : 0.0f), Scale, Scale);
     }
     const double Now = FPlatformTime::Seconds();
+    if (Now - QuitPromptTime <= QuitConfirmSeconds)
+    {
+      const FString Text = TEXT("Press Esc again to quit");
+      float TextWidth = 0.0f;
+      float TextHeight = 0.0f;
+      Canvas->StrLen(GEngine->GetMediumFont(), Text, TextWidth, TextHeight);
+      const float Scale = 2.5f;
+      Canvas->SetDrawColor(FColor::White);
+      Canvas->DrawText(GEngine->GetMediumFont(), Text, (ViewWidth - TextWidth * Scale) * 0.5f,
+          Canvas->ClipY * 0.35f, Scale, Scale);
+    }
     if (FpsWindowStart == 0.0)
     {
       FpsWindowStart = Now;
@@ -1111,6 +1187,10 @@ private:
   bool bPitchDownKeyDown = false;
   bool bCameraPadDown = false;
   bool bResetKeyDown = false;
+  bool bQuitKeyDown = false;
+  /// When Esc was first pressed; a second press within QuitConfirmSeconds quits.
+  double QuitPromptTime = -1000.0;
+  static constexpr double QuitConfirmSeconds = 3.0;
   bool bResetPadDown = false;
   bool bGearKeyDown = false;
   bool bGearPadDown = false;

@@ -1,5 +1,9 @@
 {
   "vehicle.ue4.ford.crown": {
+    "eye": [-8.0, -20.0, 116.22],
+    "mirror_eye": [-2.92, -32.41, 116.22],
+    "mesh": "/Game/Carla/Static/Car/4Wheeled/FordCrown01/SK_FordCrown01_Player.SK_FordCrown01_Player",
+    "mirrors_every_frame": false,
     "mirrors": [
       {
         "name": "left",

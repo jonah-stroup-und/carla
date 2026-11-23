@@ -24,7 +24,22 @@ class ACarlaWheeledVehicle;
 ///
 /// Where the glass is comes from Config/ServerPlayerMirrors.json, keyed by
 /// blueprint id (or -server-mirrors=FILE). The file is reloaded when it
-/// changes, so a mirror can be lined up while driving. Each mirror:
+/// changes, so a mirror can be lined up while driving. Next to "mirrors",
+/// the vehicle's entry may hold:
+///
+///   "eye":        [x, y, z] the driver's eye (the interior camera), cm,
+///                 vehicle space; moves the camera live
+///   "mirror_eye": [x, y, z] the eye the mirrors' "aim" was set from
+///                 (default "eye"): the mirrors keep showing what they show
+///                 from there, as if the driver re-adjusted them after
+///                 moving the seat
+///   "mirrors_every_frame": true to render every mirror every frame instead
+///                 of one per frame in turn (smoother, much slower)
+///   "mesh":       a skeletal mesh asset path the player's car swaps to when
+///                 it spawns, e.g. one without the front headrests (built by
+///                 Util/Tools/CreateServerPlayerCarMesh.py)
+///
+/// Each mirror:
 ///
 ///   "name":       label for the log
 ///   "component":  the vehicle part the mirror is on, by component name
@@ -69,6 +84,13 @@ public:
   /// The blind-spot indicators' brightness, 0 (off) to 1, on the mirrors
   /// marked "blind_spot".
   void SetBlindSpot(float Left, float Right);
+
+  /// The config's "eye" and "mirror_eye" (vehicle space), if it sets them.
+  bool GetEye(FVector &Eye) const;
+  bool GetMirrorEye(FVector &MirrorEye) const;
+
+  /// The config's "mesh", or empty.
+  FString GetMesh() const;
 
 private:
 
