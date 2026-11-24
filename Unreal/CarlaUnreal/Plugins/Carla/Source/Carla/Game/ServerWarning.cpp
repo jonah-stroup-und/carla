@@ -58,7 +58,37 @@ EServerWarningMode NextServerWarningMode(EServerWarningMode Mode)
   return static_cast<EServerWarningMode>((static_cast<uint8>(Mode) + 1) % static_cast<uint8>(EServerWarningMode::Count));
 }
 
+int32 FServerChime::GetSampleRate()
+{
+  return ChimeRate;
+}
+
+FServerChime::FServerChime(AActor &Owner, TArray<int16> InSamples)
+  : Samples(MoveTemp(InSamples))
+{
+  CreatePlayer(Owner);
+}
+
 FServerChime::FServerChime(AActor &Owner, float Hz, int32 Beeps, float BeepSeconds, float GapSeconds, float Volume)
+{
+  CreatePlayer(Owner);
+
+  const int32 Beep = FMath::RoundToInt(BeepSeconds * ChimeRate);
+  const int32 Gap = FMath::RoundToInt(GapSeconds * ChimeRate);
+  const int32 Fade = FMath::Max(1, FMath::RoundToInt(ChimeFadeSeconds * ChimeRate));
+  for (int32 Index = 0; Index < Beeps; ++Index)
+  {
+    for (int32 Sample = 0; Sample < Beep; ++Sample)
+    {
+      const float Envelope = FMath::Min3(1.0f, Sample / static_cast<float>(Fade), (Beep - Sample) / static_cast<float>(Fade));
+      const float Value = Volume * Envelope * FMath::Sin(2.0f * PI * Hz * Sample / ChimeRate);
+      Samples.Add(static_cast<int16>(Value * 32767.0f));
+    }
+    Samples.AddZeroed(Gap);
+  }
+}
+
+void FServerChime::CreatePlayer(AActor &Owner)
 {
   USoundWaveProcedural *NewWave = NewObject<USoundWaveProcedural>();
   NewWave->SetSampleRate(ChimeRate);
@@ -76,20 +106,6 @@ FServerChime::FServerChime(AActor &Owner, float Hz, int32 Beeps, float BeepSecon
   NewComponent->RegisterComponent();
   NewComponent->Play();
   Component = NewComponent;
-
-  const int32 Beep = FMath::RoundToInt(BeepSeconds * ChimeRate);
-  const int32 Gap = FMath::RoundToInt(GapSeconds * ChimeRate);
-  const int32 Fade = FMath::Max(1, FMath::RoundToInt(ChimeFadeSeconds * ChimeRate));
-  for (int32 Index = 0; Index < Beeps; ++Index)
-  {
-    for (int32 Sample = 0; Sample < Beep; ++Sample)
-    {
-      const float Envelope = FMath::Min3(1.0f, Sample / static_cast<float>(Fade), (Beep - Sample) / static_cast<float>(Fade));
-      const float Value = Volume * Envelope * FMath::Sin(2.0f * PI * Hz * Sample / ChimeRate);
-      Samples.Add(static_cast<int16>(Value * 32767.0f));
-    }
-    Samples.AddZeroed(Gap);
-  }
 }
 
 FServerChime::~FServerChime()

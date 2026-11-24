@@ -40,7 +40,13 @@ class FServerChime
 public:
 
   FServerChime(AActor &Owner, float Hz, int32 Beeps, float BeepSeconds, float GapSeconds, float Volume);
+
+  /// Any generated sound: mono 16-bit samples at GetSampleRate().
+  FServerChime(AActor &Owner, TArray<int16> InSamples);
+
   ~FServerChime();
+
+  static int32 GetSampleRate();
 
   FServerChime(const FServerChime &) = delete;
   FServerChime &operator=(const FServerChime &) = delete;
@@ -49,6 +55,8 @@ public:
   void Play();
 
 private:
+
+  void CreatePlayer(AActor &Owner);
 
   TStrongObjectPtr<USoundWaveProcedural> Wave;
   TWeakObjectPtr<UAudioComponent> Component;

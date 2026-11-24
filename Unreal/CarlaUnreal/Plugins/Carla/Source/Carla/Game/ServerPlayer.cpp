@@ -14,6 +14,7 @@
 #include "Carla/Game/CarlaGameModeBase.h"
 #include "Carla/Game/CarlaStatics.h"
 #include "Carla/Game/ServerBlindSpot.h"
+#include "Carla/Game/ServerBlinker.h"
 #include "Carla/Game/ServerDriveReport.h"
 #include "Carla/Game/ServerMirrors.h"
 #include "Carla/Game/ServerMission.h"
@@ -238,6 +239,7 @@ public:
     Report.reset();
     BlindSpot.Reset();
     Pillars.Reset();
+    Blinker.Reset();
     Mirrors.Reset();
     UDebugDrawService::Unregister(FpsDrawHandle);
     for (TWeakObjectPtr<ACameraActor> &SideCamera : SideCameras)
@@ -270,6 +272,7 @@ public:
       Report.reset(); // that drive is over
       BlindSpot.Reset();
       Pillars.Reset();
+      Blinker.Reset();
       Mirrors.Reset();
       if (!Spawn())
       {
@@ -284,6 +287,7 @@ public:
       BlindSpot->SetTest(Settings.bWarningTest);
       Pillars = MakeUnique<FServerPillars>(*Vehicle, BlueprintId, Settings.Pillars);
       Pillars->SetTest(Settings.bWarningTest);
+      Blinker = MakeUnique<FServerBlinker>(*Vehicle);
       Report->SetAidMode(BlindSpotAid, GetServerWarningModeName(Settings.BlindSpot));
       if (Pillars->HasPillars())
       {
@@ -335,6 +339,10 @@ public:
     {
       Drive(*Controller, DeltaSeconds);
       Signal(*Controller);
+    }
+    {
+      const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
+      Blinker->Tick(Lights.LeftBlinker, Lights.RightBlinker);
     }
     MonitorBlindSpot(*Controller, DeltaSeconds);
     MonitorPillars(*Controller, DeltaSeconds);
@@ -1103,6 +1111,8 @@ private:
     HudSpeedMph = FMath::Abs(SpeedKmh) / FServerDriveReport::KmhPerMph;
     const float LimitKmh = Report ? Report->GetSpeedLimitKmh() : -1.0f;
     HudLimitMph = LimitKmh > 0.0f ? FMath::RoundToFloat(LimitKmh / FServerDriveReport::KmhPerMph) : -1.0f;
+    HudBlinkerLit[0] = Blinker && Blinker->IsLeftLit();
+    HudBlinkerLit[1] = Blinker && Blinker->IsRightLit();
     const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
     const TCHAR *SignalText = Lights.LeftBlinker ? TEXT("<< ") : (Lights.RightBlinker ? TEXT(" >>") : TEXT(" - "));
     HudText = FString::Printf(TEXT("gear %s%s [Q]    signal %s [Z/X]    camera: %s [C]    blind spot: %s [B]    A-pillars: %s [P]    reset [Backspace]    quit [Esc]    violations: %d"),
@@ -1147,6 +1157,35 @@ private:
     Canvas.StrLen(Font, TEXT("MPH"), UnitWidth, UnitHeight);
     Canvas.DrawText(Font, TEXT("MPH"), CentreX - UnitWidth * UnitScale * 0.5f, SpeedY + LineHeight * SpeedScale * 0.92f, UnitScale, UnitScale);
 
+    // Turn-signal arrows either side of the digits, spaced for three of
+    // them so they do not move with the speed: dim, bright green when lit.
+    float WideWidth = 0.0f;
+    float WideHeight = 0.0f;
+    Canvas.StrLen(Font, TEXT("188"), WideWidth, WideHeight);
+    const float ArrowHeight = Height * 0.045f;
+    const float ArrowLength = ArrowHeight * 1.1f;
+    const float ArrowGap = WideWidth * SpeedScale * 0.5f + Height * 0.02f;
+    const float ArrowY = SpeedY + LineHeight * SpeedScale * 0.5f;
+    const auto DrawArrow = [&](bool bPointsLeft, bool bLit) {
+      const float Direction = bPointsLeft ? -1.0f : 1.0f;
+      const float Base = CentreX + Direction * ArrowGap;  // the tail's end
+      const float Tip = Base + Direction * ArrowLength;
+      const float Neck = Base + Direction * ArrowLength * 0.45f;
+      const FLinearColor Color = bLit ? FLinearColor(0.1f, 1.0f, 0.25f, 1.0f) : FLinearColor(0.15f, 0.3f, 0.18f, 0.55f);
+      FCanvasTriangleItem Head(FVector2D(Tip, ArrowY), FVector2D(Neck, ArrowY - ArrowHeight * 0.5f),
+          FVector2D(Neck, ArrowY + ArrowHeight * 0.5f), GWhiteTexture);
+      Head.SetColor(Color);
+      Head.BlendMode = SE_BLEND_Translucent;
+      Canvas.DrawItem(Head);
+      const float Thickness = ArrowHeight * 0.38f;
+      FCanvasTileItem Tail(FVector2D(FMath::Min(Base, Neck), ArrowY - Thickness * 0.5f), GWhiteTexture,
+          FVector2D(FMath::Abs(Neck - Base), Thickness), Color);
+      Tail.BlendMode = SE_BLEND_Translucent;
+      Canvas.DrawItem(Tail);
+    };
+    DrawArrow(true, HudBlinkerLit[0]);
+    DrawArrow(false, HudBlinkerLit[1]);
+
     if (HudLimitMph <= 0.0f)
     {
       return;
@@ -1154,7 +1193,7 @@ private:
     // The sign: a black-bordered white plate, SPEED / LIMIT over the number.
     const float SignWidth = Height * 0.075f;
     const float SignHeight = SignWidth * 1.25f;
-    const float SignX = CentreX + FMath::Max(Width * SpeedScale * 0.5f, UnitWidth * UnitScale * 0.5f) + Height * 0.03f;
+    const float SignX = CentreX + ArrowGap + ArrowLength + Height * 0.03f;
     const float SignY = SpeedY + LineHeight * SpeedScale * 0.5f - SignHeight * 0.5f;
     const float Border = SignWidth * 0.06f;
     FCanvasTileItem Outer(FVector2D(SignX, SignY), GWhiteTexture, FVector2D(SignWidth, SignHeight), FLinearColor::Black);
@@ -1379,6 +1418,9 @@ private:
   /// The speedometer; -1 hides it (the mission planner is open).
   float HudSpeedMph = -1.0f;
   float HudLimitMph = -1.0f;
+  /// The left and right turn-signal indicators, lit this frame.
+  bool HudBlinkerLit[2] = {false, false};
+  TUniquePtr<FServerBlinker> Blinker;
   bool bSurroundReady = false;
   bool bSurroundFailed = false;
   float SurroundFovs[SurroundScreens] = {60.0f, 60.0f, 60.0f};
