@@ -46,6 +46,9 @@ class UCarlaEpisode;
 ///                                  to line them up
 ///   -server-reports=DIR            where the drive reports go, default Reports
 ///                                  on the desktop
+///   -server-mission=NAME|PATH      the mission (waypoints to drive to):
+///                                  Missions/NAME.json in the project, or a
+///                                  file; default Missions/<map>.json
 ///   -server-surround[=FOV]         spread the window over three side-by-side
 ///                                  monitors, each with its own camera turned
 ///                                  to face that way; FOV is the centre
@@ -92,10 +95,13 @@ struct FServerPlayerSettings
 /// stopped), A/D or Left/Right steer, Z/X left/right turn signal, Space
 /// handbrake, C camera (chase, far chase, interior), Backspace reset upright,
 /// B cycles the blind-spot monitor (off, visual, visual + audio), P the
-/// A-pillar monitor, Esc twice (within 3 s) quits,
+/// A-pillar monitor, M the mission planner (FServerMission), R restarts the
+/// mission, Esc twice (within 3 s) quits,
 /// F9 cycles the upscaler (TSR, DLAA, DLSS Quality, Balanced, Performance).
 /// Gamepad: right/left trigger throttle and brake, X drive/reverse, left
 /// stick steer, d-pad left/right turn signal, A handbrake, Y camera, Back reset.
+/// Steering wheel and pedals (FServerWheel): steering one to one, throttle and
+/// brake, buttons mapped in Config/ServerWheel.json (or -server-wheel=FILE).
 ///
 /// Each drive (a vehicle, from spawn to the end of the episode) is recorded
 /// by an FServerDriveReport: collisions and traffic violations, written as

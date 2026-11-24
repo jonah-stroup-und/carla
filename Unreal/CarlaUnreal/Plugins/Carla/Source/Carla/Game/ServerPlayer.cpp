@@ -16,7 +16,9 @@
 #include "Carla/Game/ServerBlindSpot.h"
 #include "Carla/Game/ServerDriveReport.h"
 #include "Carla/Game/ServerMirrors.h"
+#include "Carla/Game/ServerMission.h"
 #include "Carla/Game/ServerPillars.h"
+#include "Carla/Game/ServerWheel.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "Carla/Vehicle/VehicleControl.h"
 #include "Carla/Vehicle/VehicleInputPriority.h"
@@ -30,6 +32,8 @@
 #include "Engine/SkeletalMesh.h"
 #include "Debug/DebugDrawService.h"
 #include "Engine/Canvas.h"
+#include "CanvasItem.h"
+#include "TextureResource.h"
 #include "Engine/Font.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
@@ -120,6 +124,9 @@ namespace
   constexpr float SteerReleasePerSecond = 5.0f;
   /// Steering available at and above this speed, as a fraction of full lock.
   constexpr float HighSpeedSteer = 0.35f;
+  /// The speedometer turns red this far over the limit (the drive report
+  /// starts a speeding stretch 2 km/h, about 1.2 mph, over it).
+  constexpr float SpeedometerOverMph = 1.0f;
   constexpr float HighSpeedKmh = 120.0f;
   /// The gear only changes below this speed (cm/s, about 5 km/h).
   constexpr float GearSwitchSpeed = 140.0f;
@@ -188,6 +195,7 @@ public:
       Settings(InSettings),
       RandomEngine(static_cast<uint32>(InSettings.Seed))
   {
+    Wheel = MakeUnique<FServerWheel>();
     // A canvas overlay rather than "stat fps": stat commands are compiled
     // out of Shipping builds.
     FpsDrawHandle = UDebugDrawService::Register(
@@ -226,6 +234,7 @@ public:
 
   ~FImpl()
   {
+    Mission.Reset();
     Report.reset();
     BlindSpot.Reset();
     Pillars.Reset();
@@ -251,6 +260,7 @@ public:
     {
       return; // not yet: retry next frame
     }
+    Wheel->Poll();
     if (!Vehicle.IsValid())
     {
       if (bSpawned)
@@ -282,7 +292,26 @@ public:
       bSpawned = true;
     }
 
-    TakeView(*Controller);
+    if (!Mission)
+    {
+      Mission = MakeUnique<FServerMission>(Episode);
+    }
+    // M: the mission planner (a top-down map), and back to driving.
+    if (Pressed(*Controller, EKeys::M, bMissionKeyDown) | Wheel->WasPressed(EServerWheelAction::Mission))
+    {
+      Mission->SetPlanning(!Mission->IsPlanning(), *Controller, *Vehicle);
+    }
+    const bool bPlanning = Mission->IsPlanning();
+    if ((Pressed(*Controller, EKeys::R, bRestartKeyDown) | Wheel->WasPressed(EServerWheelAction::Restart)) && !bPlanning)
+    {
+      Mission->Restart();
+    }
+    if (CheckQuit(*Controller))
+    {
+      return;
+    }
+
+    TakeView(*Controller, !bPlanning);
     if (Settings.bSurround && !bSurroundFailed)
     {
       if (!bSurroundReady)
@@ -298,15 +327,23 @@ public:
       Upscaler = static_cast<EUpscaler>((static_cast<uint8>(Upscaler) + 1) % static_cast<uint8>(EUpscaler::Count));
       ApplyUpscaler();
     }
-    Drive(*Controller, DeltaSeconds);
-    Signal(*Controller);
+    if (bPlanning)
+    {
+      HoldStill(*Vehicle);
+    }
+    else
+    {
+      Drive(*Controller, DeltaSeconds);
+      Signal(*Controller);
+    }
     MonitorBlindSpot(*Controller, DeltaSeconds);
     MonitorPillars(*Controller, DeltaSeconds);
     Report->Tick();
+    Mission->Tick(*Controller, *Vehicle, *Report, DeltaSeconds);
     // The mirrors are aimed from the driver's eye, and only render while
     // the driver can see them.
     Mirrors->Tick(Vehicle->GetActorTransform().TransformPosition(GetMirrorEyeLocation()),
-        CameraMode == ECameraMode::Interior);
+        CameraMode == ECameraMode::Interior && !bPlanning);
     // The config's eye can move while driving.
     if (CameraMode == ECameraMode::Interior && Arm.IsValid() &&
         !Arm->GetRelativeLocation().Equals(GetEyeLocation(), 0.01))
@@ -749,11 +786,12 @@ private:
     UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: car mesh %s"), *Path);
   }
 
-  void TakeView(APlayerController &Controller)
+  /// The driver's view (unless the mission planner has it).
+  void TakeView(APlayerController &Controller, bool bDriverView)
   {
     ACarlaWheeledVehicle *Car = Vehicle.Get();
     Controller.bAutoManageActiveCameraTarget = false;
-    if (Controller.GetViewTarget() != Car)
+    if (bDriverView && Controller.GetViewTarget() != Car)
     {
       Controller.SetViewTarget(Car);
     }
@@ -823,6 +861,35 @@ private:
     return FMath::Abs(Value) < StickDeadZone ? 0.0f : Value;
   }
 
+  /// Esc twice within a few seconds closes the game (the drive report is
+  /// written on the way out).
+  bool CheckQuit(APlayerController &Controller)
+  {
+    if (!Pressed(Controller, EKeys::Escape, bQuitKeyDown))
+    {
+      return false;
+    }
+    const double Now = FPlatformTime::Seconds();
+    if (Now - QuitPromptTime <= QuitConfirmSeconds)
+    {
+      UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: Esc pressed twice; quitting"));
+      Controller.ConsoleCommand(TEXT("quit"));
+      return true;
+    }
+    QuitPromptTime = Now;
+    return false;
+  }
+
+  /// Brakes on while the mission planner is open.
+  void HoldStill(ACarlaWheeledVehicle &Car)
+  {
+    FVehicleControl Control;
+    Control.Brake = 1.0f;
+    Control.bHandBrake = true;
+    Control.bReverse = bReverse;
+    Car.ApplyVehicleControl(Control, EVehicleInputPriority::User);
+  }
+
   void Drive(APlayerController &Controller, float DeltaSeconds)
   {
     ACarlaWheeledVehicle *Car = Vehicle.Get();
@@ -837,25 +904,12 @@ private:
       UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: interior pitch %.0f deg (-server-player-pitch=%.0f)"),
           Settings.InteriorPitch, Settings.InteriorPitch);
     }
-    if (Pressed(Controller, EKeys::C, bCameraKeyDown) | Pressed(Controller, EKeys::Gamepad_FaceButton_Top, bCameraPadDown))
+    if (Pressed(Controller, EKeys::C, bCameraKeyDown) | Pressed(Controller, EKeys::Gamepad_FaceButton_Top, bCameraPadDown) | Wheel->WasPressed(EServerWheelAction::Camera))
     {
       CameraMode = static_cast<ECameraMode>((static_cast<uint8>(CameraMode) + 1) % static_cast<uint8>(ECameraMode::Count));
       ApplyCameraMode();
     }
-    // Esc twice within a few seconds closes the game (the drive report is
-    // written on the way out).
-    if (Pressed(Controller, EKeys::Escape, bQuitKeyDown))
-    {
-      const double Now = FPlatformTime::Seconds();
-      if (Now - QuitPromptTime <= QuitConfirmSeconds)
-      {
-        UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: Esc pressed twice; quitting"));
-        Controller.ConsoleCommand(TEXT("quit"));
-        return;
-      }
-      QuitPromptTime = Now;
-    }
-    if (Pressed(Controller, EKeys::BackSpace, bResetKeyDown) | Pressed(Controller, EKeys::Gamepad_Special_Left, bResetPadDown))
+    if (Pressed(Controller, EKeys::BackSpace, bResetKeyDown) | Pressed(Controller, EKeys::Gamepad_Special_Left, bResetPadDown) | Wheel->WasPressed(EServerWheelAction::Reset))
     {
       ResetUpright(*Car);
     }
@@ -864,13 +918,13 @@ private:
       return Controller.IsInputKeyDown(A) || Controller.IsInputKeyDown(B);
     };
     const float Throttle = FMath::Max(Down(EKeys::W, EKeys::Up) ? 1.0f : 0.0f,
-        Analog(Controller, EKeys::Gamepad_RightTriggerAxis));
+        FMath::Max(Analog(Controller, EKeys::Gamepad_RightTriggerAxis), Wheel->GetThrottle()));
     const float Brake = FMath::Max(Down(EKeys::S, EKeys::Down) ? 1.0f : 0.0f,
-        Analog(Controller, EKeys::Gamepad_LeftTriggerAxis));
+        FMath::Max(Analog(Controller, EKeys::Gamepad_LeftTriggerAxis), Wheel->GetBrake()));
 
     // Q toggles drive/reverse, only when nearly stopped; W drives in that gear.
     const float Speed = Car->GetVehicleForwardSpeed(); // cm/s, negative backwards
-    if (Pressed(Controller, EKeys::Q, bGearKeyDown) | Pressed(Controller, EKeys::Gamepad_FaceButton_Left, bGearPadDown))
+    if (Pressed(Controller, EKeys::Q, bGearKeyDown) | Pressed(Controller, EKeys::Gamepad_FaceButton_Left, bGearPadDown) | Wheel->WasPressed(EServerWheelAction::Gear))
     {
       if (FMath::Abs(Speed) < GearSwitchSpeed)
       {
@@ -886,7 +940,12 @@ private:
     const float SpeedKmh = FMath::Abs(Speed) * 0.036f;
     const float MaxSteer = FMath::Lerp(1.0f, HighSpeedSteer, FMath::Clamp(SpeedKmh / HighSpeedKmh, 0.0f, 1.0f));
     const float Stick = Analog(Controller, EKeys::Gamepad_LeftX);
-    if (Stick != 0.0f)
+    if (Wheel->IsConnected())
+    {
+      // A wheel steers one to one: its lock-to-lock is set on the base.
+      Steer = Wheel->GetSteer();
+    }
+    else if (Stick != 0.0f)
     {
       Steer = Stick * MaxSteer;
     }
@@ -902,7 +961,8 @@ private:
     Control.Throttle = Throttle;
     Control.Brake = Brake;
     Control.Steer = FMath::Clamp(Steer, -1.0f, 1.0f);
-    Control.bHandBrake = Controller.IsInputKeyDown(EKeys::SpaceBar) || Controller.IsInputKeyDown(EKeys::Gamepad_FaceButton_Bottom);
+    Control.bHandBrake = Controller.IsInputKeyDown(EKeys::SpaceBar) || Controller.IsInputKeyDown(EKeys::Gamepad_FaceButton_Bottom) ||
+        Wheel->IsDown(EServerWheelAction::HandBrake);
     Control.bReverse = bReverse;
     Car->ApplyVehicleControl(Control, EVehicleInputPriority::User);
   }
@@ -913,8 +973,8 @@ private:
   {
     ACarlaWheeledVehicle *Car = Vehicle.Get();
     FVehicleLightState Lights = Car->GetVehicleLightState();
-    const bool bLeftPressed = Pressed(Controller, EKeys::Z, bLeftKeyDown) | Pressed(Controller, EKeys::Gamepad_DPad_Left, bLeftPadDown);
-    const bool bRightPressed = Pressed(Controller, EKeys::X, bRightKeyDown) | Pressed(Controller, EKeys::Gamepad_DPad_Right, bRightPadDown);
+    const bool bLeftPressed = Pressed(Controller, EKeys::Z, bLeftKeyDown) | Pressed(Controller, EKeys::Gamepad_DPad_Left, bLeftPadDown) | Wheel->WasPressed(EServerWheelAction::SignalLeft);
+    const bool bRightPressed = Pressed(Controller, EKeys::X, bRightKeyDown) | Pressed(Controller, EKeys::Gamepad_DPad_Right, bRightPadDown) | Wheel->WasPressed(EServerWheelAction::SignalRight);
     bool bLeft = Lights.LeftBlinker;
     bool bRight = Lights.RightBlinker;
     if (bLeftPressed)
@@ -959,7 +1019,7 @@ private:
   /// reported whatever the mode, so drives with and without it compare.
   void MonitorBlindSpot(APlayerController &Controller, float DeltaSeconds)
   {
-    if (Pressed(Controller, EKeys::B, bBlindSpotKeyDown))
+    if (Pressed(Controller, EKeys::B, bBlindSpotKeyDown) | Wheel->WasPressed(EServerWheelAction::BlindSpot))
     {
       Settings.BlindSpot = NextServerWarningMode(Settings.BlindSpot);
       BlindSpot->SetMode(Settings.BlindSpot);
@@ -985,7 +1045,7 @@ private:
   /// behind a pillar is reported whatever the mode.
   void MonitorPillars(APlayerController &Controller, float DeltaSeconds)
   {
-    if (Pressed(Controller, EKeys::P, bPillarsKeyDown))
+    if (Pressed(Controller, EKeys::P, bPillarsKeyDown) | Wheel->WasPressed(EServerWheelAction::Pillars))
     {
       Settings.Pillars = NextServerWarningMode(Settings.Pillars);
       Pillars->SetMode(Settings.Pillars);
@@ -1033,18 +1093,98 @@ private:
     const float SpeedKmh = Vehicle->GetVehicleForwardSpeed() * 0.036f;
     const bool bRefused = FPlatformTime::Seconds() < GearRefusedUntil;
     HudColor = bRefused ? FColor::Orange : FColor::White;
+    if (Mission && Mission->IsPlanning())
+    {
+      HudText.Reset(); // the planner draws its own
+      HudSpeedMph = -1.0f;
+      return;
+    }
+    // The speedometer and the limit (snapped to 5 mph, as speeding is judged).
+    HudSpeedMph = FMath::Abs(SpeedKmh) / FServerDriveReport::KmhPerMph;
+    const float LimitKmh = Report ? Report->GetSpeedLimitKmh() : -1.0f;
+    HudLimitMph = LimitKmh > 0.0f ? FMath::RoundToFloat(LimitKmh / FServerDriveReport::KmhPerMph) : -1.0f;
     const FVehicleLightState Lights = Vehicle->GetVehicleLightState();
     const TCHAR *SignalText = Lights.LeftBlinker ? TEXT("<< ") : (Lights.RightBlinker ? TEXT(" >>") : TEXT(" - "));
-    HudText = FString::Printf(TEXT("%3.0f km/h  %s%s    signal %s [Z/X]    gear [Q]    camera: %s [C]    blind spot: %s [B]    A-pillars: %s [P]    reset [Backspace]    quit [Esc]    violations: %d"),
-            FMath::Abs(SpeedKmh), bReverse ? TEXT("R") : TEXT("D"),
+    HudText = FString::Printf(TEXT("gear %s%s [Q]    signal %s [Z/X]    camera: %s [C]    blind spot: %s [B]    A-pillars: %s [P]    reset [Backspace]    quit [Esc]    violations: %d"),
+            bReverse ? TEXT("R") : TEXT("D"),
             bRefused ? TEXT(" (stop to shift)") : TEXT(""), SignalText, CameraModeName(CameraMode),
             GetServerWarningModeName(Settings.BlindSpot), GetServerWarningModeName(Settings.Pillars),
             Report ? Report->GetViolationCount() : 0);
+    if (Wheel && Wheel->IsConnected())
+    {
+      // The last control pressed, to map buttons in Config/ServerWheel.json.
+      const FString Last = Wheel->GetLastPressed();
+      HudText += FString::Printf(TEXT("    wheel%s%s"), Last.IsEmpty() ? TEXT("") : TEXT(": "), *Last);
+    }
     // Outside the car the mirrors are not in view: the indicators go on the HUD.
     BlindSpotHud[0] = CameraMode != ECameraMode::Interior && BlindSpot ? BlindSpot->GetIndicator(FServerBlindSpot::Left) : 0.0f;
     BlindSpotHud[1] = CameraMode != ECameraMode::Interior && BlindSpot ? BlindSpot->GetIndicator(FServerBlindSpot::Right) : 0.0f;
     PillarHud[0] = CameraMode != ECameraMode::Interior && Pillars ? Pillars->GetIndicator(FServerPillars::Left) : 0.0f;
     PillarHud[1] = CameraMode != ECameraMode::Interior && Pillars ? Pillars->GetIndicator(FServerPillars::Right) : 0.0f;
+  }
+
+  /// Bottom centre of the driver's screen: the speed in mph (red above the
+  /// limit) and, beside it, a US-style speed-limit sign.
+  void DrawSpeedometer(UCanvas &Canvas, float ViewWidth)
+  {
+    UFont *Font = GEngine->GetLargeFont();
+    const bool bOver = HudLimitMph > 0.0f && HudSpeedMph > HudLimitMph + SpeedometerOverMph;
+    const float Height = Canvas.ClipY;
+    const float CentreX = ViewWidth * 0.5f;
+
+    const FString Speed = FString::Printf(TEXT("%.0f"), HudSpeedMph);
+    float Width = 0.0f;
+    float LineHeight = 0.0f;
+    Canvas.StrLen(Font, Speed, Width, LineHeight);
+    // Digits about 7% of the screen's height.
+    const float SpeedScale = Height * 0.07f / FMath::Max(LineHeight, 1.0f);
+    const float SpeedY = Height * 0.80f;
+    Canvas.SetDrawColor(bOver ? FColor(255, 60, 40) : FColor::White);
+    Canvas.DrawText(Font, Speed, CentreX - Width * SpeedScale * 0.5f, SpeedY, SpeedScale, SpeedScale);
+    const float UnitScale = SpeedScale * 0.35f;
+    float UnitWidth = 0.0f;
+    float UnitHeight = 0.0f;
+    Canvas.StrLen(Font, TEXT("MPH"), UnitWidth, UnitHeight);
+    Canvas.DrawText(Font, TEXT("MPH"), CentreX - UnitWidth * UnitScale * 0.5f, SpeedY + LineHeight * SpeedScale * 0.92f, UnitScale, UnitScale);
+
+    if (HudLimitMph <= 0.0f)
+    {
+      return;
+    }
+    // The sign: a black-bordered white plate, SPEED / LIMIT over the number.
+    const float SignWidth = Height * 0.075f;
+    const float SignHeight = SignWidth * 1.25f;
+    const float SignX = CentreX + FMath::Max(Width * SpeedScale * 0.5f, UnitWidth * UnitScale * 0.5f) + Height * 0.03f;
+    const float SignY = SpeedY + LineHeight * SpeedScale * 0.5f - SignHeight * 0.5f;
+    const float Border = SignWidth * 0.06f;
+    FCanvasTileItem Outer(FVector2D(SignX, SignY), GWhiteTexture, FVector2D(SignWidth, SignHeight), FLinearColor::Black);
+    Canvas.DrawItem(Outer);
+    FCanvasTileItem Inner(FVector2D(SignX + Border, SignY + Border), GWhiteTexture,
+        FVector2D(SignWidth - 2.0f * Border, SignHeight - 2.0f * Border), FLinearColor::White);
+    Canvas.DrawItem(Inner);
+    Canvas.SetDrawColor(FColor::Black);
+    const auto Centred = [&](const FString &Text, float Y, float Scale) {
+      float TextWidth = 0.0f;
+      float TextHeight = 0.0f;
+      Canvas.StrLen(Font, Text, TextWidth, TextHeight);
+      Canvas.DrawText(Font, Text, SignX + (SignWidth - TextWidth * Scale) * 0.5f, Y, Scale, Scale);
+      return TextHeight * Scale;
+    };
+    // The words span 70% of the plate; the number fills what is left below.
+    float WordWidth = 0.0f;
+    float WordHeight = 0.0f;
+    Canvas.StrLen(Font, TEXT("SPEED"), WordWidth, WordHeight);
+    const float WordScale = SignWidth * 0.7f / FMath::Max(WordWidth, 1.0f);
+    float Y = SignY + Border * 2.0f;
+    Y += Centred(TEXT("SPEED"), Y, WordScale) * 0.95f;
+    Y += Centred(TEXT("LIMIT"), Y, WordScale);
+    const FString Number = FString::Printf(TEXT("%.0f"), HudLimitMph);
+    float NumberWidth = 0.0f;
+    float NumberHeight = 0.0f;
+    Canvas.StrLen(Font, Number, NumberWidth, NumberHeight);
+    const float Room = SignY + SignHeight - Border * 2.0f - Y;
+    const float NumberScale = FMath::Min(Room / FMath::Max(NumberHeight, 1.0f), SignWidth * 0.8f / FMath::Max(NumberWidth, 1.0f));
+    Centred(Number, Y + (Room - NumberHeight * NumberScale) * 0.5f, NumberScale);
   }
 
   /// Top-right frame counter: rendered frames per second, averaged over
@@ -1062,10 +1202,19 @@ private:
       return;
     }
     const float ViewWidth = bSurroundReady ? SurroundCentreWidth : Canvas->ClipX;
+    float MissionY = 16.0f;
     if (!HudText.IsEmpty())
     {
       Canvas->SetDrawColor(HudColor);
       Canvas->DrawText(GEngine->GetMediumFont(), HudText, 24.0f, 16.0f, 1.3f, 1.3f);
+      float LineWidth = 0.0f;
+      float LineHeight = 0.0f;
+      Canvas->StrLen(GEngine->GetMediumFont(), HudText, LineWidth, LineHeight);
+      MissionY += LineHeight * 1.3f + 6.0f;
+    }
+    if (Mission && Vehicle.IsValid())
+    {
+      Mission->Draw(*Canvas, ViewWidth, MissionY);
     }
     for (int32 Index = 0; Index < 4; ++Index)
     {
@@ -1085,6 +1234,10 @@ private:
       const float X = Side == FServerBlindSpot::Left ? 24.0f : ViewWidth - TextWidth * Scale - 24.0f;
       Canvas->SetDrawColor(FLinearColor(1.0f, 0.42f, 0.02f, Level).ToFColor(true));
       Canvas->DrawText(GEngine->GetMediumFont(), Text, X, Canvas->ClipY * 0.5f + (bPillar ? TextHeight * Scale * 1.3f : 0.0f), Scale, Scale);
+    }
+    if (HudSpeedMph >= 0.0f)
+    {
+      DrawSpeedometer(*Canvas, ViewWidth);
     }
     const double Now = FPlatformTime::Seconds();
     if (Now - QuitPromptTime <= QuitConfirmSeconds)
@@ -1198,11 +1351,15 @@ private:
   bool bSpawned = false;
   FString BlueprintId;
   std::unique_ptr<FServerDriveReport> Report;
+  TUniquePtr<FServerMission> Mission;
+  bool bMissionKeyDown = false;
+  bool bRestartKeyDown = false;
   TUniquePtr<FServerMirrors> Mirrors;
   TUniquePtr<FServerBlindSpot> BlindSpot;
   bool bBlindSpotKeyDown = false;
   float BlindSpotHud[2] = {0.0f, 0.0f};
   TUniquePtr<FServerPillars> Pillars;
+  TUniquePtr<FServerWheel> Wheel;
   bool bPillarsKeyDown = false;
   float PillarHud[2] = {0.0f, 0.0f};
   /// The drive report's names for the driver aids.
@@ -1219,6 +1376,9 @@ private:
   FDelegateHandle FpsDrawHandle;
   FString HudText;
   FColor HudColor = FColor::White;
+  /// The speedometer; -1 hides it (the mission planner is open).
+  float HudSpeedMph = -1.0f;
+  float HudLimitMph = -1.0f;
   bool bSurroundReady = false;
   bool bSurroundFailed = false;
   float SurroundFovs[SurroundScreens] = {60.0f, 60.0f, 60.0f};

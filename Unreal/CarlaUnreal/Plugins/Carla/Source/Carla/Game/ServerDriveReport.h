@@ -87,6 +87,37 @@ public:
   /// spot, with the road user involved.
   void AddInfo(const TCHAR *Name, const FString &Details, const AActor *Other);
 
+  /// The number of events recorded so far: a cursor for GetViolationsSince.
+  int32 GetEventCount() const { return Events.Num(); }
+
+  /// The names of the violations recorded from event index First on (a
+  /// collision is recorded once the contact ends, speeding once the car
+  /// slows down).
+  TArray<FString> GetViolationsSince(int32 First) const;
+
+  struct FViolation
+  {
+    FString Name;
+    /// Speeding: the peak speed and the limit (km/h); -1 when unknown.
+    float SpeedKmh = -1.0f;
+    float SpeedLimitKmh = -1.0f;
+  };
+
+  /// As GetViolationsSince, with the speeds.
+  TArray<FViolation> GetViolationDetailsSince(int32 First) const;
+
+  /// The limit on the road the car is on, km/h, snapped to the nearest
+  /// 5 mph (CARLA's 30/40/60/90 km/h become 20/25/35/55 mph); -1 when the
+  /// road has none. Speeding is judged against this limit.
+  float GetSpeedLimitKmh() const { return SpeedLimitKmh(); }
+
+  /// km/h in one mph.
+  static constexpr float KmhPerMph = 1.609344f;
+
+  /// An extra row of the summary, e.g. ("Mission score", "420"); replaces
+  /// the row with that name.
+  void SetSummaryValue(const FString &Name, const FString &Value);
+
 private:
 
   struct FEvent
@@ -154,6 +185,10 @@ private:
   double LastSignalledLaneChange = -1.0;
 
   TWeakObjectPtr<ATrafficLightBase> TrafficLight;
+  /// Left this light's trigger box on red: running it if the car enters the
+  /// junction while it is still red.
+  TWeakObjectPtr<ATrafficLightBase> RedLightLeft;
+  double RedLightLeftTime = 0.0;
 
   struct FAidMode
   {
@@ -161,4 +196,5 @@ private:
     bool bMixed = false;
   };
   TMap<FString, FAidMode> AidModes;
+  TArray<TPair<FString, FString>> SummaryValues;
 };

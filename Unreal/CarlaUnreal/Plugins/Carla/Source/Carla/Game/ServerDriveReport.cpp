@@ -55,9 +55,10 @@ namespace
   /// the same kind this close together are one event.
   constexpr double CrossingCooldownSeconds = 2.0;
   /// Running a red light: leaving the light's trigger box forwards, faster
-  /// than this, towards a junction this far ahead.
-  constexpr float RedLightMinSpeedKmh = 3.0f;
-  constexpr float RedLightJunctionLookahead = 600.0f; // cm
+  /// than this, then the front of the car entering the junction while the
+  /// light is still red, within this long.
+  constexpr float RedLightMinSpeedKmh = 1.0f;
+  constexpr double RedLightPendingSeconds = 60.0;
 
   using LaneMarkingType = carla::road::element::LaneMarking::Type;
 
@@ -255,7 +256,14 @@ float FServerDriveReport::SpeedLimitKmh() const
     return -1.0f;
   }
   const AWheeledVehicleAIController *Controller = Cast<AWheeledVehicleAIController>(Vehicle->GetController());
-  return Controller != nullptr ? Controller->GetSpeedLimit() : -1.0f;
+  const float Kmh = Controller != nullptr ? Controller->GetSpeedLimit() : -1.0f;
+  if (Kmh <= 0.0f)
+  {
+    return -1.0f;
+  }
+  // A US road: the map's metric limit snapped to the nearest 5 mph.
+  const float Mph = FMath::Max(5.0f, FMath::RoundToFloat(Kmh / KmhPerMph / 5.0f) * 5.0f);
+  return Mph * KmhPerMph;
 }
 
 FServerDriveReport::FEvent FServerDriveReport::MakeEvent(const TCHAR *Name, bool bViolation) const
@@ -392,7 +400,8 @@ void FServerDriveReport::TrackSpeeding(bool bFinish)
   if (Duration >= SpeedingMinSeconds)
   {
     SpeedingEvent.SpeedKmh = SpeedingPeak;
-    SpeedingEvent.Details = FString::Printf(TEXT("peak %.0f km/h for %.1f s"), SpeedingPeak, Duration);
+    SpeedingEvent.Details = FString::Printf(TEXT("peak %.0f mph in a %.0f mph zone for %.1f s"),
+        SpeedingPeak / KmhPerMph, SpeedingEvent.SpeedLimitKmh / KmhPerMph, Duration);
     Add(SpeedingEvent);
   }
 }
@@ -480,36 +489,47 @@ void FServerDriveReport::TrackTrafficLight()
   ATrafficLightBase *Current = Controller != nullptr ? Controller->GetTrafficLight() : nullptr;
   ATrafficLightBase *Previous = TrafficLight.Get();
   TrafficLight = Current;
-  if (Previous == nullptr || Previous == Current)
+  const double Now = GameTime();
+  if (Current != nullptr)
+  {
+    RedLightLeft.Reset(); // back in a light's box (this one or the next)
+  }
+  else if (Previous != nullptr && Previous->GetTrafficLightState() == ETrafficLightState::Red &&
+           Vehicle->GetVehicleForwardSpeed() * 0.036f >= RedLightMinSpeedKmh)
+  {
+    // Left the light's trigger box forwards on red. The box can end short
+    // of the stop line, so this alone is not running the light: entering
+    // the junction while it is still red is.
+    RedLightLeft = Previous;
+    RedLightLeftTime = Now;
+  }
+
+  ATrafficLightBase *Light = RedLightLeft.Get();
+  if (Light == nullptr)
   {
     return;
   }
-  // Left the light's trigger box (it sits on the approach, up to the stop
-  // line). Driving out of it forwards into the junction on red runs the light.
-  if (Previous->GetTrafficLightState() != ETrafficLightState::Red)
+  if (Light->GetTrafficLightState() != ETrafficLightState::Red || Now - RedLightLeftTime > RedLightPendingSeconds)
   {
-    return;
-  }
-  const float ForwardSpeed = Vehicle->GetVehicleForwardSpeed() * 0.036f;
-  if (ForwardSpeed < RedLightMinSpeedKmh)
-  {
+    RedLightLeft.Reset(); // waited for green (or drove off elsewhere)
     return;
   }
   const carla::road::Map *RoadMap = GetRoadMap(Episode);
-  if (RoadMap != nullptr)
+  if (RoadMap == nullptr)
   {
-    const FVector Ahead = Vehicle->GetActorLocation() + Vehicle->GetActorForwardVector() * RedLightJunctionLookahead;
-    const auto Waypoint = RoadMap->GetClosestWaypointOnRoad(carla::geom::Location(Ahead));
-    const auto Here = RoadMap->GetClosestWaypointOnRoad(carla::geom::Location(Vehicle->GetActorLocation()));
-    const bool bTowardsJunction = (Waypoint && RoadMap->IsJunction(Waypoint->road_id)) ||
-        (Here && RoadMap->IsJunction(Here->road_id));
-    if (!bTowardsJunction)
-    {
-      return; // changed lanes out of the box, or reversed out of it
-    }
+    return;
   }
+  // The front bumper, in the junction.
+  const FVector Front = Vehicle->GetActorLocation() +
+      Vehicle->GetActorForwardVector() * Vehicle->GetVehicleBoundingBoxExtent().X;
+  const auto Waypoint = RoadMap->GetClosestWaypointOnRoad(carla::geom::Location(Front));
+  if (!Waypoint || !RoadMap->IsJunction(Waypoint->road_id))
+  {
+    return;
+  }
+  RedLightLeft.Reset();
   FEvent Event = MakeEvent(TEXT("Ran red light"), true);
-  const FCarlaActor *View = Episode.FindCarlaActor(Previous);
+  const FCarlaActor *View = Episode.FindCarlaActor(Light);
   Event.Details = View != nullptr ? FString::Printf(TEXT("traffic light %u"), View->GetActorId()) : TEXT("traffic light");
   Add(MoveTemp(Event));
 }
@@ -537,6 +557,50 @@ void FServerDriveReport::AddInfo(const TCHAR *Name, const FString &Details, cons
     Event.OtherActor = DescribeActor(*Other);
   }
   Add(Event);
+}
+
+TArray<FString> FServerDriveReport::GetViolationsSince(int32 First) const
+{
+  TArray<FString> Names;
+  for (int32 Index = FMath::Max(First, 0); Index < Events.Num(); ++Index)
+  {
+    if (Events[Index].bViolation)
+    {
+      Names.Add(Events[Index].Name);
+    }
+  }
+  return Names;
+}
+
+TArray<FServerDriveReport::FViolation> FServerDriveReport::GetViolationDetailsSince(int32 First) const
+{
+  TArray<FViolation> Violations;
+  for (int32 Index = FMath::Max(First, 0); Index < Events.Num(); ++Index)
+  {
+    if (Events[Index].bViolation)
+    {
+      FViolation &Violation = Violations.AddDefaulted_GetRef();
+      Violation.Name = Events[Index].Name;
+      Violation.SpeedKmh = Events[Index].SpeedKmh;
+      Violation.SpeedLimitKmh = Events[Index].SpeedLimitKmh;
+    }
+  }
+  return Violations;
+}
+
+void FServerDriveReport::SetSummaryValue(const FString &Name, const FString &Value)
+{
+  for (TPair<FString, FString> &Pair : SummaryValues)
+  {
+    if (Pair.Key == Name)
+    {
+      bDirty = bDirty || Pair.Value != Value;
+      Pair.Value = Value;
+      return;
+    }
+  }
+  SummaryValues.Emplace(Name, Value);
+  bDirty = true;
 }
 
 FString FServerDriveReport::DescribeActor(const AActor &Actor) const
@@ -580,7 +644,8 @@ void FServerDriveReport::Write()
   {
     FEvent Open = SpeedingEvent;
     Open.SpeedKmh = SpeedingPeak;
-    Open.Details = FString::Printf(TEXT("peak %.0f km/h for %.1f s (ongoing)"), SpeedingPeak, GameTime() - SpeedingStart);
+    Open.Details = FString::Printf(TEXT("peak %.0f mph in a %.0f mph zone for %.1f s (ongoing)"),
+        SpeedingPeak / KmhPerMph, SpeedingEvent.SpeedLimitKmh / KmhPerMph, GameTime() - SpeedingStart);
     Rows.Add(Open);
     ++Violations;
   }
@@ -629,6 +694,10 @@ void FServerDriveReport::Write()
   for (const auto &Pair : AidModes)
   {
     Summary += Csv(Pair.Key) + TEXT(",") + Csv(Pair.Value.bMixed ? FString(TEXT("mixed")) : Pair.Value.Mode) + TEXT("\n");
+  }
+  for (const TPair<FString, FString> &Pair : SummaryValues)
+  {
+    Summary += Csv(Pair.Key) + TEXT(",") + Csv(Pair.Value) + TEXT("\n");
   }
   Counts.KeySort([](const FString &A, const FString &B) { return A < B; });
   for (const auto &Pair : Counts)

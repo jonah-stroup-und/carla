@@ -1,0 +1,18 @@
+{
+  "vendor": "0EB7",
+  "steer":    { "axis": "x", "invert": false, "deadzone": 0.0, "gamma": 2.0, "gain": 1.0 },
+  "throttle": { "axis": "z", "invert": true, "deadzone": 0.02, "gamma": 0.7 },
+  "brake":    { "axis": "r", "invert": true, "deadzone": 0.02, "gamma": 0.7, "gain": 1.5 },
+  "buttons": {
+    "signal_left":  [6, "pov_left"],
+    "signal_right": [5, "pov_right"],
+    "camera":       ["pov_up"],
+    "gear":         [8, "pov_down"],
+    "reset":        [],
+    "handbrake":    [],
+    "blind_spot":   [],
+    "pillars":      [],
+    "mission":      [],
+    "restart":      []
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "map": "Town10HD_Opt",
+  "radius_m": 6.0,
+  "points_per_waypoint": 100,
+  "penalties": {
+    "Collision with vehicle": 50,
+    "Collision with pedestrian": 100,
+    "Collision with object": 25,
+    "Ran red light": 50,
+    "Crossed solid line": 20,
+    "Speeding": 10,
+    "Lane change without signal": 0
+  },
+  "waypoints": [
+    [-69.71, -68.72, -0.02],
+    [-58.64, 136.85, 0.15],
+    [16.27, 24.73, -0.01]
+  ]
+}
