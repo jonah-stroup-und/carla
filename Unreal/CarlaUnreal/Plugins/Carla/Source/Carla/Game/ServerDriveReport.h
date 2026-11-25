@@ -78,6 +78,11 @@ public:
 
   void OnHit(AActor *OtherActor, const FVector &NormalImpulse, const FHitResult &Hit);
 
+  /// The crashes since the last call (the road and kerb tops left out),
+  /// for the wheel's force feedback: their summed impulse, N s, and where
+  /// they hit, -1 the car's left to 1 its right.
+  float TakeImpact(float &OutSide);
+
   /// A driver aid's mode, e.g. ("Blind-spot monitor", "visual"): logged
   /// when it changes, and the summary gives the one in use (or "mixed" when
   /// it changed during the drive).
@@ -172,6 +177,8 @@ private:
   int32 ViolationCount = 0;
 
   TMap<TWeakObjectPtr<AActor>, FContact> Contacts;
+  float ImpactSum = 0.0f;        // N s, since TakeImpact
+  float ImpactSideSum = 0.0f;    // impulse x side
 
   bool bSpeeding = false;
   FEvent SpeedingEvent;

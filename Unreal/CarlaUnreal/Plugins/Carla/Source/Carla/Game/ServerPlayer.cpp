@@ -20,6 +20,7 @@
 #include "Carla/Game/ServerMission.h"
 #include "Carla/Game/ServerPillars.h"
 #include "Carla/Game/ServerWheel.h"
+#include "Carla/Game/ServerForceFeedback.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "Carla/Vehicle/VehicleControl.h"
 #include "Carla/Vehicle/VehicleInputPriority.h"
@@ -197,6 +198,7 @@ public:
       RandomEngine(static_cast<uint32>(InSettings.Seed))
   {
     Wheel = MakeUnique<FServerWheel>();
+    ForceFeedback = MakeUnique<FServerForceFeedback>();
     // A canvas overlay rather than "stat fps": stat commands are compiled
     // out of Shipping builds.
     FpsDrawHandle = UDebugDrawService::Register(
@@ -235,6 +237,7 @@ public:
 
   ~FImpl()
   {
+    ForceFeedback.Reset(); // the wheel goes limp
     Mission.Reset();
     Report.reset();
     BlindSpot.Reset();
@@ -347,6 +350,16 @@ public:
     MonitorBlindSpot(*Controller, DeltaSeconds);
     MonitorPillars(*Controller, DeltaSeconds);
     Report->Tick();
+    if (ForceFeedback)
+    {
+      float Side = 0.0f;
+      const float Impulse = Report->TakeImpact(Side);
+      if (Impulse > 0.0f)
+      {
+        ForceFeedback->AddImpact(Impulse, Side);
+      }
+      ForceFeedback->Tick(DeltaSeconds, Vehicle->GetVehicleForwardSpeed() * 0.01f, !bPlanning);
+    }
     Mission->Tick(*Controller, *Vehicle, *Report, DeltaSeconds);
     // The mirrors are aimed from the driver's eye, and only render while
     // the driver can see them.
@@ -881,6 +894,7 @@ private:
     if (Now - QuitPromptTime <= QuitConfirmSeconds)
     {
       UE_LOG(LogCarlaServerPlayer, Log, TEXT("Server player: Esc pressed twice; quitting"));
+      ForceFeedback.Reset(); // limp at once, not after the shutdown
       Controller.ConsoleCommand(TEXT("quit"));
       return true;
     }
@@ -1124,7 +1138,8 @@ private:
     {
       // The last control pressed, to map buttons in Config/ServerWheel.json.
       const FString Last = Wheel->GetLastPressed();
-      HudText += FString::Printf(TEXT("    wheel%s%s"), Last.IsEmpty() ? TEXT("") : TEXT(": "), *Last);
+      HudText += FString::Printf(TEXT("    wheel%s%s%s"), ForceFeedback && ForceFeedback->IsActive() ? TEXT(" (FFB)") : TEXT(""),
+          Last.IsEmpty() ? TEXT("") : TEXT(": "), *Last);
     }
     // Outside the car the mirrors are not in view: the indicators go on the HUD.
     BlindSpotHud[0] = CameraMode != ECameraMode::Interior && BlindSpot ? BlindSpot->GetIndicator(FServerBlindSpot::Left) : 0.0f;
@@ -1399,6 +1414,7 @@ private:
   float BlindSpotHud[2] = {0.0f, 0.0f};
   TUniquePtr<FServerPillars> Pillars;
   TUniquePtr<FServerWheel> Wheel;
+  TUniquePtr<FServerForceFeedback> ForceFeedback;
   bool bPillarsKeyDown = false;
   float PillarHud[2] = {0.0f, 0.0f};
   /// The drive report's names for the driver aids.

@@ -93,7 +93,11 @@ private:
   bool SnapToRoad(const FVector &Location, FVector &OutLocation) const;
   float GroundHeight(const FVector &Location) const;
   float NodeGroundHeight(int32 Node);
-  bool RouteFrom(int32 Start, const FVector &Target, TArray<FVector> &OutPoints, int32 *OutEnd);
+  bool RouteFrom(const TArray<int32> &Starts, const FVector &Target, TArray<FVector> &OutPoints, int32 *OutEnd);
+
+  /// Where the car's route starts (FServerRoadGraph::FindStarts), looking
+  /// further afield when it is off the road.
+  TArray<int32> FindCarStarts(const FVector &Location, const FVector &Forward) const;
 
   // Driving
   void TickDriving(ACarlaWheeledVehicle &Car, FServerDriveReport &Report);

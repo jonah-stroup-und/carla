@@ -431,11 +431,25 @@ float FServerMission::NodeGroundHeight(int32 Node)
   return NodeGround.Add(Node, GroundHeight(Graph.GetLocation(Node)));
 }
 
-bool FServerMission::RouteFrom(int32 Start, const FVector &TargetLocation, TArray<FVector> &OutPoints, int32 *OutEnd)
+TArray<int32> FServerMission::FindCarStarts(const FVector &Location, const FVector &Forward) const
+{
+  TArray<int32> Starts = Graph.FindStarts(Location, Forward, MissionStartReach);
+  if (Starts.Num() == 0)
+  {
+    const int32 Far = Graph.FindNearest(Location, FVector::ZeroVector, MissionStartFarReach);
+    if (Far != INDEX_NONE)
+    {
+      Starts.Add(Far);
+    }
+  }
+  return Starts;
+}
+
+bool FServerMission::RouteFrom(const TArray<int32> &Starts, const FVector &TargetLocation, TArray<FVector> &OutPoints, int32 *OutEnd)
 {
   OutPoints.Reset();
   TArray<int32> Nodes;
-  if (!Graph.FindRoute(Start, TargetLocation, Radius, Nodes))
+  if (Starts.Num() == 0 || !Graph.FindRoute(Starts, TargetLocation, Radius, Nodes))
   {
     return false;
   }
@@ -540,7 +554,20 @@ void FServerMission::TickDriving(ACarlaWheeledVehicle &Car, FServerDriveReport &
 
   const FVector Location = Car.GetActorLocation();
   const FVector &Goal = Waypoints[Target];
-  if (FVector::Dist2D(Location, Goal) <= Radius && FMath::Abs(Location.Z - Goal.Z) <= MissionReachHeight)
+  bool bArrived = FVector::Dist2D(Location, Goal) <= Radius && FMath::Abs(Location.Z - Goal.Z) <= MissionReachHeight;
+  if (bArrived && EnsureGraph())
+  {
+    // On the goal's side of the street, as the route leads: not passing it
+    // the other way.
+    const int32 GoalLane = Graph.FindGoalLane(Goal, Radius);
+    if (GoalLane != INDEX_NONE)
+    {
+      const FVector Heading = Car.GetActorForwardVector();
+      const FVector &Lane = Graph.GetDirection(GoalLane);
+      bArrived = Heading.X * Lane.X + Heading.Y * Lane.Y > 0.0;
+    }
+  }
+  if (bArrived)
   {
     ReachWaypoint(Report);
     if (bComplete)
@@ -561,12 +588,7 @@ void FServerMission::TickDriving(ACarlaWheeledVehicle &Car, FServerDriveReport &
   if (EnsureGraph())
   {
     const FVector Forward = Car.GetActorForwardVector();
-    int32 Start = Graph.FindNearest(Location, Forward, MissionStartReach);
-    if (Start == INDEX_NONE)
-    {
-      Start = Graph.FindNearest(Location, FVector::ZeroVector, MissionStartFarReach);
-    }
-    bNoRoute = Start == INDEX_NONE || !RouteFrom(Start, Next, Points, nullptr);
+    bNoRoute = !RouteFrom(FindCarStarts(Location, Forward), Next, Points, nullptr);
     // Not under or behind the car.
     int32 Trim = 0;
     while (Trim < 5 && Points.Num() - Trim > 2 &&
@@ -912,23 +934,26 @@ void FServerMission::UpdatePlanLegs()
   PlanLegs.Reset();
   PlanLegOk.Reset();
   const bool bGraph = EnsureGraph();
-  int32 Start = INDEX_NONE;
+  TArray<int32> Starts;
   if (bGraph)
   {
-    Start = Graph.FindNearest(CarLocation, CarForward, MissionStartReach);
-    if (Start == INDEX_NONE)
-    {
-      Start = Graph.FindNearest(CarLocation, FVector::ZeroVector, MissionStartFarReach);
-    }
+    Starts = FindCarStarts(CarLocation, CarForward);
   }
   for (const FVector &Waypoint : Waypoints)
   {
     TArray<FVector> Points;
     int32 End = INDEX_NONE;
-    const bool bOk = bGraph && Start != INDEX_NONE && RouteFrom(Start, Waypoint, Points, &End);
+    const bool bOk = bGraph && RouteFrom(Starts, Waypoint, Points, &End);
     PlanLegOk.Add(bOk);
     PlanLegs.Add(MoveTemp(Points));
-    Start = bOk ? End : (bGraph ? Graph.FindNearest(Waypoint, FVector::ZeroVector, Radius) : INDEX_NONE);
+    // The next leg leaves from where this one arrived (or, without a route,
+    // from the waypoint's own lane).
+    Starts.Reset();
+    const int32 From = bOk ? End : (bGraph ? Graph.FindGoalLane(Waypoint, Radius) : INDEX_NONE);
+    if (From != INDEX_NONE)
+    {
+      Starts.Add(From);
+    }
   }
 }
 

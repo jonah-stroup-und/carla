@@ -38,6 +38,15 @@ namespace
   /// Goal nodes must be within this height of the target (cm): not a bridge
   /// above it.
   constexpr float RouteGoalHeight = 500.0f;
+  /// A goal node must head within this of the goal lane's direction (cos
+  /// 45 deg): its own lane and the ones beside it going the same way.
+  constexpr float RouteGoalAlignment = 0.7f;
+  /// Other starts may be this much further from the car than the nearest
+  /// (cm): the lanes through a junction that overlap where it is, not the
+  /// lane beside it, which is a lane's width (about 3.5 m) away.
+  constexpr float RouteStartTolerance = 150.0f;
+  /// And must head within this of the car (cos 45 deg).
+  constexpr float RouteStartAlignment = 0.7f;
 
   uint64 RouteLaneKey(const FRouteWaypoint &Waypoint)
   {
@@ -88,6 +97,7 @@ void FServerRoadGraph::Build(const carla::road::Map &Map)
     FNode Node;
     Node.Location = FVector(Transform.location);
     Node.Direction = FVector(Forward.x, Forward.y, Forward.z).GetSafeNormal();
+    Node.bJunction = Map.IsJunction(Waypoint.road_id);
     Nodes.Add(Node);
     Edges.AddDefaulted();
     Waypoints.Add(Waypoint);
@@ -253,17 +263,109 @@ int32 FServerRoadGraph::FindNearest(const FVector &Location, const FVector &Forw
   return Best;
 }
 
-bool FServerRoadGraph::FindRoute(int32 Start, const FVector &Target, float Radius, TArray<int32> &OutPath) const
+TArray<int32> FServerRoadGraph::FindStarts(const FVector &Location, const FVector &Forward, float MaxDistance) const
 {
-  OutPath.Reset();
-  if (!Nodes.IsValidIndex(Start))
+  TArray<int32> Starts;
+  const int32 Nearest = FindNearest(Location, Forward, MaxDistance);
+  if (Nearest == INDEX_NONE)
+  {
+    return Starts;
+  }
+  Starts.Add(Nearest);
+  const FVector Heading = FVector(Forward.X, Forward.Y, 0.0f).GetSafeNormal();
+  if (Heading.IsZero())
+  {
+    return Starts;
+  }
+  const float Reach = FVector::Dist(Nodes[Nearest].Location, Location) + RouteStartTolerance;
+  const int32 Cells = FMath::CeilToInt(Reach / RouteGridCell);
+  const FIntPoint Cell = CellOf(Location);
+  for (int32 DX = -Cells; DX <= Cells; ++DX)
+  {
+    for (int32 DY = -Cells; DY <= Cells; ++DY)
+    {
+      const TArray<int32> *Bucket = Grid.Find(Cell + FIntPoint(DX, DY));
+      if (Bucket == nullptr)
+      {
+        continue;
+      }
+      for (int32 Node : *Bucket)
+      {
+        const FVector Direction(Nodes[Node].Direction.X, Nodes[Node].Direction.Y, 0.0f);
+        if (Node != Nearest && FVector::Dist(Nodes[Node].Location, Location) <= Reach &&
+            FVector::DotProduct(Direction.GetSafeNormal(), Heading) >= RouteStartAlignment)
+        {
+          Starts.Add(Node);
+        }
+      }
+    }
+  }
+  return Starts;
+}
+
+int32 FServerRoadGraph::FindGoalLane(const FVector &Target, float Radius) const
+{
+  const int32 Reach = FMath::CeilToInt(Radius / RouteGridCell);
+  const FIntPoint Cell = CellOf(Target);
+  int32 Best = INDEX_NONE;
+  float BestScore = TNumericLimits<float>::Max();
+  for (int32 DX = -Reach; DX <= Reach; ++DX)
+  {
+    for (int32 DY = -Reach; DY <= Reach; ++DY)
+    {
+      const TArray<int32> *Bucket = Grid.Find(Cell + FIntPoint(DX, DY));
+      if (Bucket == nullptr)
+      {
+        continue;
+      }
+      for (int32 Node : *Bucket)
+      {
+        const FNode &Candidate = Nodes[Node];
+        const float Distance = RouteDistance2D(Candidate.Location, Target);
+        if (Distance > Radius || FMath::Abs(Candidate.Location.Z - Target.Z) > RouteGoalHeight)
+        {
+          continue;
+        }
+        // A goal by a junction is on the road, not one of the turns through it.
+        const float Score = Distance + (Candidate.bJunction ? 2.0f * Radius : 0.0f);
+        if (Score < BestScore)
+        {
+          BestScore = Score;
+          Best = Node;
+        }
+      }
+    }
+  }
+  return Best;
+}
+
+bool FServerRoadGraph::IsGoal(int32 Node, int32 GoalLane, const FVector &Target, float Radius) const
+{
+  const FNode &Candidate = Nodes[Node];
+  if (RouteDistance2D(Candidate.Location, Target) > Radius ||
+      FMath::Abs(Candidate.Location.Z - Target.Z) > RouteGoalHeight)
   {
     return false;
   }
-  const auto IsGoal = [&](int32 Node) {
-    return RouteDistance2D(Nodes[Node].Location, Target) <= Radius &&
-        FMath::Abs(Nodes[Node].Location.Z - Target.Z) <= RouteGoalHeight;
-  };
+  if (!Nodes.IsValidIndex(GoalLane))
+  {
+    return true;
+  }
+  const FNode &Lane = Nodes[GoalLane];
+  if (Candidate.bJunction && !Lane.bJunction)
+  {
+    return false;
+  }
+  const FVector A(Candidate.Direction.X, Candidate.Direction.Y, 0.0f);
+  const FVector B(Lane.Direction.X, Lane.Direction.Y, 0.0f);
+  return FVector::DotProduct(A.GetSafeNormal(), B.GetSafeNormal()) >= RouteGoalAlignment;
+}
+
+bool FServerRoadGraph::FindRoute(const TArray<int32> &Starts, const FVector &Target, float Radius, TArray<int32> &OutPath) const
+{
+  OutPath.Reset();
+  const int32 GoalLane = FindGoalLane(Target, Radius);
+  const auto IsGoalNode = [&](int32 Node) { return IsGoal(Node, GoalLane, Target, Radius); };
   const auto Heuristic = [&](int32 Node) {
     return FMath::Max(RouteDistance2D(Nodes[Node].Location, Target) - Radius, 0.0f);
   };
@@ -281,8 +383,14 @@ bool FServerRoadGraph::FindRoute(int32 Start, const FVector &Target, float Radiu
   TArray<bool> Closed;
   Closed.Init(false, Nodes.Num());
   TArray<FOpen> Open;
-  Cost[Start] = 0.0f;
-  Open.HeapPush({Heuristic(Start), Start});
+  for (int32 Start : Starts)
+  {
+    if (Nodes.IsValidIndex(Start) && Cost[Start] > 0.0f)
+    {
+      Cost[Start] = 0.0f;
+      Open.HeapPush({Heuristic(Start), Start});
+    }
+  }
   int32 Goal = INDEX_NONE;
   while (Open.Num() > 0)
   {
@@ -293,7 +401,7 @@ bool FServerRoadGraph::FindRoute(int32 Start, const FVector &Target, float Radiu
       continue;
     }
     Closed[Top.Node] = true;
-    if (IsGoal(Top.Node))
+    if (IsGoalNode(Top.Node))
     {
       Goal = Top.Node;
       break;

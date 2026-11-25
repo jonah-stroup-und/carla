@@ -337,6 +337,14 @@ void FServerDriveReport::OnHit(AActor *OtherActor, const FVector &NormalImpulse,
   }
 
   const float Impulse = NormalImpulse.Size() * 0.01f; // kg cm/s -> N s
+  if (Vehicle.IsValid())
+  {
+    // Which side of the car it hit, from the contact point.
+    const FVector Local = Vehicle->GetActorTransform().InverseTransformPosition(Hit.ImpactPoint);
+    const float HalfWidth = FMath::Max(static_cast<float>(Vehicle->GetVehicleBoundingBoxExtent().Y), 50.0f);
+    ImpactSum += Impulse;
+    ImpactSideSum += Impulse * FMath::Clamp(static_cast<float>(Local.Y) / HalfWidth, -1.0f, 1.0f);
+  }
   FContact *Contact = Contacts.Find(OtherActor);
   if (Contact == nullptr)
   {
@@ -351,6 +359,15 @@ void FServerDriveReport::OnHit(AActor *OtherActor, const FVector &NormalImpulse,
   Contact->LastHit = GameTime();
   Contact->PeakImpulse = FMath::Max(Contact->PeakImpulse, Impulse);
   Contact->bReportable = Contact->bReportable || bVehicle || bWalker || Contact->PeakImpulse >= ObjectImpulseThreshold;
+}
+
+float FServerDriveReport::TakeImpact(float &OutSide)
+{
+  const float Sum = ImpactSum;
+  OutSide = Sum > 0.0f ? ImpactSideSum / Sum : 0.0f;
+  ImpactSum = 0.0f;
+  ImpactSideSum = 0.0f;
+  return Sum;
 }
 
 void FServerDriveReport::CloseContacts(bool bAll)

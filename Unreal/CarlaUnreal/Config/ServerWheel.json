@@ -14,5 +14,6 @@
     "pillars":      [],
     "mission":      [],
     "restart":      []
-  }
+  },
+  "force_feedback": { "enabled": true, "strength": 0.3, "centering": 1.0, "damping": 1.0, "collisions": 2.0 }
 }

@@ -41,10 +41,26 @@ public:
   /// along Forward (a zero Forward: any direction). INDEX_NONE when none.
   int32 FindNearest(const FVector &Location, const FVector &Forward, float MaxDistance) const;
 
-  /// The shortest legal route from Start to any node within Radius
-  /// (horizontally) of Target, as nodes from Start to that node. False when
-  /// there is none.
-  bool FindRoute(int32 Start, const FVector &Target, float Radius, TArray<int32> &OutPath) const;
+  /// Where a car at Location heading along Forward can start a route: the
+  /// nearest node (as FindNearest) and every other node as near to the car
+  /// and heading its way, e.g. at a junction's entrance, the start of each
+  /// turn through it, which all begin at the same spot. Empty when none.
+  TArray<int32> FindStarts(const FVector &Location, const FVector &Forward, float MaxDistance) const;
+
+  /// The lane a goal at Target is on: the nearest node within Radius,
+  /// outside a junction if there is one. INDEX_NONE when none.
+  int32 FindGoalLane(const FVector &Target, float Radius) const;
+
+  /// Whether Node counts as arriving at a goal at Target: within Radius
+  /// (horizontally) and travelling the way the goal's lane (GoalLane, from
+  /// FindGoalLane) does. Not the lanes on the other side of the street, nor
+  /// a junction's turning lanes that cut across the goal.
+  bool IsGoal(int32 Node, int32 GoalLane, const FVector &Target, float Radius) const;
+
+  /// The shortest legal route from any of Starts to a goal node (IsGoal)
+  /// of Target, as nodes from that start to that node. False when there is
+  /// none.
+  bool FindRoute(const TArray<int32> &Starts, const FVector &Target, float Radius, TArray<int32> &OutPath) const;
 
 private:
 
@@ -52,6 +68,7 @@ private:
   {
     FVector Location = FVector::ZeroVector;
     FVector Direction = FVector::ForwardVector;
+    bool bJunction = false;
   };
 
   struct FEdge
