@@ -21,6 +21,7 @@
 #include "Carla/Game/ServerPillars.h"
 #include "Carla/Game/ServerWheel.h"
 #include "Carla/Game/ServerForceFeedback.h"
+#include "Carla/Game/ServerCarSound.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "Carla/Vehicle/VehicleControl.h"
 #include "Carla/Vehicle/VehicleInputPriority.h"
@@ -243,6 +244,7 @@ public:
     BlindSpot.Reset();
     Pillars.Reset();
     Blinker.Reset();
+    CarSound.Reset();
     Mirrors.Reset();
     UDebugDrawService::Unregister(FpsDrawHandle);
     for (TWeakObjectPtr<ACameraActor> &SideCamera : SideCameras)
@@ -276,6 +278,7 @@ public:
       BlindSpot.Reset();
       Pillars.Reset();
       Blinker.Reset();
+      CarSound.Reset();
       Mirrors.Reset();
       if (!Spawn())
       {
@@ -291,6 +294,7 @@ public:
       Pillars = MakeUnique<FServerPillars>(*Vehicle, BlueprintId, Settings.Pillars);
       Pillars->SetTest(Settings.bWarningTest);
       Blinker = MakeUnique<FServerBlinker>(*Vehicle);
+      CarSound = MakeUnique<FServerCarSound>(*Vehicle);
       Report->SetAidMode(BlindSpotAid, GetServerWarningModeName(Settings.BlindSpot));
       if (Pillars->HasPillars())
       {
@@ -350,14 +354,21 @@ public:
     MonitorBlindSpot(*Controller, DeltaSeconds);
     MonitorPillars(*Controller, DeltaSeconds);
     Report->Tick();
-    if (ForceFeedback)
     {
       float Side = 0.0f;
       const float Impulse = Report->TakeImpact(Side);
       if (Impulse > 0.0f)
       {
-        ForceFeedback->AddImpact(Impulse, Side);
+        CarSound->AddImpact(Impulse);
+        if (ForceFeedback)
+        {
+          ForceFeedback->AddImpact(Impulse, Side);
+        }
       }
+      CarSound->Tick(DeltaSeconds, CameraMode == ECameraMode::Interior && !bPlanning);
+    }
+    if (ForceFeedback)
+    {
       ForceFeedback->Tick(DeltaSeconds, Vehicle->GetVehicleForwardSpeed() * 0.01f, !bPlanning);
     }
     Mission->Tick(*Controller, *Vehicle, *Report, DeltaSeconds);
@@ -1437,6 +1448,7 @@ private:
   /// The left and right turn-signal indicators, lit this frame.
   bool HudBlinkerLit[2] = {false, false};
   TUniquePtr<FServerBlinker> Blinker;
+  TUniquePtr<FServerCarSound> CarSound;
   bool bSurroundReady = false;
   bool bSurroundFailed = false;
   float SurroundFovs[SurroundScreens] = {60.0f, 60.0f, 60.0f};

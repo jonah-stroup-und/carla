@@ -1,0 +1,8 @@
+{
+  "volume": 0.8,
+  "engine": 1.0,
+  "road": 1.0,
+  "tyres": 1.0,
+  "collisions": 1.0,
+  "debug": false
+}
