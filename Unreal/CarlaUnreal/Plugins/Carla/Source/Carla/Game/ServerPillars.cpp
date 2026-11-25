@@ -40,7 +40,7 @@ namespace
 
   /// Road users nearer or further than this (cm) are ignored.
   constexpr float PillarMinRange = 150.0f;
-  constexpr float PillarMaxRange = 6000.0f;
+  constexpr float PillarMaxRange = 2000.0f; // about 65 ft
   /// Of the road user's centre and four edge points, how many the pillar
   /// must cover (the centre always among them).
   constexpr int32 PillarHiddenPoints = 3;
